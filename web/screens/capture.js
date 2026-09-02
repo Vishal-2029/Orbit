@@ -467,7 +467,7 @@ const ScreenCapture = (() => {
         <div id="flash" class="shot-flash"></div>
         <div class="cam-overlay">
           <div class="cam-top">
-            <button class="back" onclick="history.back()">←</button>
+            <button class="back" onclick="location.hash='#/'" title="Back to home">←</button>
             <div class="cam-title">${escapeHtml(capture.title)}</div>
             <button id="gridBtn" class="side-btn grid-btn" title="Framing grid" aria-pressed="false">⊞</button>
             <span id="counter" class="counter">0 of ${slotCount}</span>

@@ -4,7 +4,7 @@ const ScreenViewer = (() => {
       <div class="viewer-screen">
         <div id="viewerCanvasHost"></div>
         <div class="viewer-hud">
-          <button class="back" onclick="history.back()">←</button>
+          <button class="back" onclick="location.hash='#/'" title="Back to home">←</button>
           <div class="title" id="vTitle">Loading…</div>
         </div>
         <div id="loading" class="viewer-loading">
