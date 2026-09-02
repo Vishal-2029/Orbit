@@ -67,16 +67,33 @@ _DEVICE_TO_CV = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
 # Without this the photos land on the poles, where a sphere stretches without
 # limit: a single 65-degree view smears across the entire 360 circumference and
 # the canvas explodes. With it, each view occupies the narrow slice it should.
-#   X_warp = X_sensor,  Y_warp = -Z_sensor,  Z_warp = Y_sensor
+# The warper's vertical axis points DOWN, and the sensor's +Z points UP, so the
+# sign here decides whether the sky ends up at the top of the panorama or the
+# bottom. Getting it backwards produced a vertically mirrored 360 - photos of
+# the ceiling appeared underfoot.
+#   X_warp = X_sensor,  Y_warp = +Z_sensor,  Z_warp = -Y_sensor
 _SENSOR_TO_WARPER = np.array([[1, 0, 0],
-                              [0, 0, -1],
-                              [0, 1, 0]], dtype=np.float32)
+                              [0, 0, 1],
+                              [0, -1, 0]], dtype=np.float32)
+
+
+# Half a turn about the sphere's own axis, applied last.
+#
+# Without it the reference direction - the way the user was facing for their
+# first photo - lands exactly on the panorama's wrap seam, so that photo is
+# sliced in half and shows up at BOTH edges of the finished 360. Rotating the
+# whole world half a turn puts the starting view in the middle instead, where
+# it belongs.
+_HALF_TURN = np.array([[-1, 0, 0],
+                       [0, 1, 0],
+                       [0, 0, -1]], dtype=np.float32)
 
 
 def camera_rotation(quat):
     """Device quaternion -> the world-to-camera matrix OpenCV's warper wants."""
     r_world_from_device = quaternion_to_matrix(*quat)
-    return (_DEVICE_TO_CV @ r_world_from_device.T @ _SENSOR_TO_WARPER.T).astype(np.float32)
+    m = _DEVICE_TO_CV @ r_world_from_device.T @ _SENSOR_TO_WARPER.T
+    return (_HALF_TURN @ m).astype(np.float32)
 
 
 def intrinsics(width, height, hfov_deg=DEFAULT_HFOV_DEG):
@@ -120,6 +137,12 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             img = images[i]
             if img.shape[:2] != (h, w):
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+            # The warper lays each photo down rotated half a turn about its own
+            # optical axis. That leaves the photo's CENTRE in the right place -
+            # which is why measuring centres never caught it - while the
+            # content inside is upside down and back to front. Rotating the
+            # source by the same amount cancels it exactly.
+            img = cv2.rotate(img, cv2.ROTATE_180)
             R = camera_rotation(quats[i])
 
             corner, wimg = warper.warp(img, K, R, cv2.INTER_LINEAR, cv2.BORDER_REFLECT)
@@ -166,6 +189,32 @@ def _compensate_exposure(warped, masks, corners):
         log.debug("[orbit-worker] exposure compensation skipped: %s", e)
 
 
+def _find_seams(warped, masks, corners):
+    """Choose where each pair of overlapping photos should hand over.
+
+    Without this, every overlap is a wide cross-fade of two photos. Anything
+    that does not line up perfectly - and handheld photos never do - is
+    averaged into a soft double image, which reads as a blurred band wherever
+    two photos meet.
+
+    A seam finder instead picks a cut line through the overlap where the two
+    photos agree most closely, so the join is a clean handover rather than a
+    blur. Masks are edited in place; failure is non-fatal and simply leaves the
+    original cross-fade behaviour.
+    """
+    try:
+        finder = cv2.detail_DpSeamFinder("COLOR_GRAD")
+        small = [im.astype(np.float32) for im in warped]
+        umats = [cv2.UMat(m) for m in masks]
+        finder.find(small, corners, umats)
+        for i, um in enumerate(umats):
+            masks[i] = um.get()
+        return True
+    except Exception as e:
+        log.debug("[orbit-worker] seam finding skipped: %s", e)
+        return False
+
+
 def _blend(warped, masks, corners):
     """Multi-band blend the warped images onto one canvas."""
     sizes = [(im.shape[1], im.shape[0]) for im in warped]
@@ -183,9 +232,12 @@ def _blend(warped, masks, corners):
         return None
 
     _compensate_exposure(warped, masks, corners)
+    seamed = _find_seams(warped, masks, corners)
 
     blender = cv2.detail_MultiBandBlender()
-    blender.setNumBands(5)
+    # With a seam chosen, only a narrow band needs feathering to hide the cut.
+    # Blending across many bands would smear the very detail the seam preserved.
+    blender.setNumBands(3 if seamed else 5)
     blender.prepare((x0, y0, x1 - x0, y1 - y0))
     for im, mask, corner in zip(warped, masks, corners):
         blender.feed(im.astype(np.int16), mask, corner)
