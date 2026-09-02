@@ -29,7 +29,15 @@ const FramesViewer = (() => {
     let velocity = 0; // frames per ms, smoothed
     let lastMoveTime = 0;
     let autospin = null;
-    const PIXELS_PER_FRAME = 8;
+    // How far you drag to advance one frame. Larger = slower, finer control.
+    // At 8px a small flick tore through the whole spin in an instant.
+    const PIXELS_PER_FRAME = 26;
+    // Milliseconds per frame when spinning on its own. 60ms was a blur; this is
+    // a slow, readable turn - a full circle takes about n * 0.18 seconds.
+    const AUTOSPIN_MS_PER_FRAME = 180;
+    // How quickly a flick runs out of momentum. Lower = stops sooner.
+    const INERTIA_DECAY = 0.90;
+    const MAX_FLICK_SPEED = 0.012;   // frames per ms
 
     function wrapIndex(i) {
       return ((i % n) + n) % n;
@@ -70,12 +78,22 @@ const FramesViewer = (() => {
     }
 
     function inertia() {
-      let v = velocity;
+      // Cap the launch speed: without this a fast swipe on a phone spun the
+      // object so quickly the frames were unreadable.
+      let v = Math.max(-MAX_FLICK_SPEED, Math.min(MAX_FLICK_SPEED, velocity));
+      let carry = 0;
       function step() {
-        if (Math.abs(v) < 0.002) return;
-        index = wrapIndex(Math.round(index + v * 16));
-        render();
-        v *= 0.92;
+        if (Math.abs(v) < 0.0015) return;
+        // Accumulate fractional frames so slow speeds still advance smoothly
+        // instead of rounding to zero and stalling.
+        carry += v * 16;
+        const whole = Math.trunc(carry);
+        if (whole !== 0) {
+          carry -= whole;
+          index = wrapIndex(index + whole);
+          render();
+        }
+        v *= INERTIA_DECAY;
         requestAnimationFrame(step);
       }
       requestAnimationFrame(step);
@@ -87,7 +105,7 @@ const FramesViewer = (() => {
       function step(t) {
         if (dragging) { autospin = null; return; }
         const dt = t - last;
-        if (dt > 60) {
+        if (dt > AUTOSPIN_MS_PER_FRAME) {
           index = wrapIndex(index + 1);
           render();
           last = t;
