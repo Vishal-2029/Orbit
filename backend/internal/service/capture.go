@@ -59,7 +59,7 @@ type CreateInput struct {
 func (s *Capture) Create(ctx context.Context, in CreateInput) (*domain.Capture, domain.Plan, error) {
 	mode := in.Mode
 	switch mode {
-	case domain.ModeSpin, domain.ModeAuto:
+	case domain.ModeSpin, domain.ModeAuto, domain.ModeSphere:
 		// keep as-is
 	default:
 		mode = domain.ModePano
