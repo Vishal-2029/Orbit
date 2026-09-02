@@ -78,8 +78,23 @@ func NewServer(svc *service.Capture, hub *realtime.Hub, store storage.Store, cfg
 	// needs ONE reachable URL (and one https tunnel) instead of two origins,
 	// which also sidesteps CORS and mixed-content entirely.
 	if st, err := os.Stat(cfg.WebDir); err == nil && st.IsDir() {
-		app.Static("/", cfg.WebDir, fiber.Static{Index: "index.html"})
-		log.Printf("serving web client from %s at /", cfg.WebDir)
+		// Without an explicit Cache-Control, browsers fall back to heuristic
+		// caching: they invent an expiry from the Last-Modified date and serve
+		// the stale copy without asking. That left phones running an old build
+		// of the app after a deploy, with no obvious way for the user to know.
+		//
+		// no-cache does not mean "do not cache" - it means "always revalidate".
+		// The browser still keeps the file and still gets a cheap 304 when
+		// nothing changed, but it can never silently serve a stale one.
+		app.Use(func(c *fiber.Ctx) error {
+			if strings.HasPrefix(c.Path(), "/api/") || strings.HasPrefix(c.Path(), "/ws/") {
+				return c.Next()
+			}
+			c.Set("Cache-Control", "no-cache, must-revalidate")
+			return c.Next()
+		})
+		app.Static("/", cfg.WebDir, fiber.Static{Index: "index.html", MaxAge: 0})
+		log.Printf("serving web client from %s at / (revalidated, never stale)", cfg.WebDir)
 	} else {
 		log.Printf("web client dir %q not found; API only (set WEB_DIR)", cfg.WebDir)
 	}
