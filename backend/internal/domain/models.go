@@ -122,20 +122,22 @@ type Frame struct {
 // Manifest is what the viewer downloads. It is deliberately self-contained:
 // the viewer needs no other API call to render.
 type Manifest struct {
-	Version     int       `json:"version"`
-	CaptureID   string    `json:"capture_id"`
-	Slug        string    `json:"slug"`
-	Title       string    `json:"title"`
-	Mode        string    `json:"mode"`
-	Renderer    string    `json:"renderer"` // "sphere" | "frames"
-	FrameCount  int       `json:"frame_count"`
-	Direction   string    `json:"direction"`
-	Width       int       `json:"width"`
-	Height      int       `json:"height"`
-	Panorama    string    `json:"panorama,omitempty"` // equirect URL when renderer=sphere
-	Frames      []string  `json:"frames,omitempty"`
-	Previews    []string  `json:"previews,omitempty"`
-	Yaws        []float64 `json:"yaws,omitempty"`
-	Degraded    bool      `json:"degraded"` // true when stitch failed and we fell back
-	DegradedWhy string    `json:"degraded_why,omitempty"`
+	Version    int       `json:"version"`
+	CaptureID  string    `json:"capture_id"`
+	Slug       string    `json:"slug"`
+	Title      string    `json:"title"`
+	Mode       string    `json:"mode"`
+	Renderer   string    `json:"renderer"` // "sphere" | "frames"
+	FrameCount int       `json:"frame_count"`
+	Direction  string    `json:"direction"`
+	Width      int       `json:"width"`
+	Height     int       `json:"height"`
+	Panorama   string    `json:"panorama,omitempty"` // equirect URL when renderer=sphere
+	Frames     []string  `json:"frames,omitempty"`
+	Previews   []string  `json:"previews,omitempty"`
+	Yaws       []float64 `json:"yaws,omitempty"`
+	// Coverage is 0..1: the share of the sphere that was actually photographed.
+	Coverage    float64 `json:"coverage,omitempty"`
+	Degraded    bool    `json:"degraded"` // true when stitch failed and we fell back
+	DegradedWhy string  `json:"degraded_why,omitempty"`
 }

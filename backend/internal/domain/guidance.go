@@ -5,6 +5,30 @@ import (
 	"math"
 )
 
+// CameraHFOV is the horizontal field of view we assume a phone has, in degrees,
+// when held upright. Phones vary between roughly 60 and 70.
+const CameraHFOV = 65.0
+
+// OverlapFraction is how much of each photo must also appear in its neighbour.
+// A third is the standard rule: enough for a stitcher to find common detail,
+// without wasting shots on redundant coverage.
+const OverlapFraction = 1.0 / 3.0
+
+// GaplessStep is the largest angle you may turn between shots and still have
+// every direction photographed. Turn further and you leave a wedge of the world
+// that no photo covers - which appears in the finished 360 as a blurred band,
+// because there is genuinely nothing there to show.
+//
+//	65 degrees of view, a third of it overlapping  ->  turn about 43 degrees
+func GaplessStep() float64 {
+	return CameraHFOV * (1 - OverlapFraction)
+}
+
+// SlotsForFullCircle is how many shots one level ring needs.
+func SlotsForFullCircle() int {
+	return int(math.Ceil(360.0 / GaplessStep()))
+}
+
 // Slot groups, in the order the user shoots them.
 const (
 	GroupCore   = "core"   // front / right / back / left — the 360 ring itself
@@ -91,19 +115,24 @@ var extraRing = []Slot{
 // what a stitcher needs. Only the four cardinals on the horizon are required;
 // everything else is there to be filled in if the user wants a fuller sphere.
 func FullSpherePlan(step float64) Plan {
+	// Never allow a spacing that would leave gaps, whatever is asked for.
+	maxStep := GaplessStep()
+	if step <= 0 || step > maxStep {
+		step = maxStep
+	}
 	if step < 15 {
 		step = 15
 	}
-	if step > 90 {
-		step = 90
-	}
+	// Rings are spaced by the same rule applied to the vertical field of view.
+	// A phone held upright sees far more vertically than horizontally, so two
+	// rings either side of the horizon reach the poles with overlap to spare.
 	rings := []struct {
 		pitch float64
 		label string
 	}{
 		{0, "Around you"},
-		{40, "Upper"},
-		{-40, "Lower"},
+		{45, "Upper"},
+		{-45, "Lower"},
 	}
 
 	slots := make([]Slot, 0, 40)
@@ -114,29 +143,31 @@ func FullSpherePlan(step float64) Plan {
 		slots = append(slots, sl)
 	}
 
-	// The horizon ring first, cardinals leading, so a user who stops early
-	// still has an even ring rather than a lopsided one.
-	cardinals := map[int]struct{ id, label, icon string }{
-		0: {"front", "Front", "▲"}, 90: {"right", "Right side", "▶"},
-		180: {"back", "Behind you", "▼"}, 270: {"left", "Left side", "◀"},
-	}
-	for _, c := range coreRing {
-		add(c, GroupCore, true)
-	}
-
 	for _, ring := range rings {
-		for yaw := 0.0; yaw < 360; yaw += step {
-			if ring.pitch == 0 {
-				if _, isCardinal := cardinals[int(yaw)]; isCardinal {
-					continue // already added above
-				}
+		ringStep := step
+		if ring.pitch != 0 {
+			// Circles of latitude are shorter, so the same arc covers more of
+			// them. Widening the spacing keeps the shot count sane without
+			// opening gaps.
+			ringStep = step / math.Cos(ring.pitch*math.Pi/180)
+			if ringStep > 90 {
+				ringStep = 90
 			}
+		}
+		for yaw := 0.0; yaw < 360; yaw += ringStep {
 			id := fmt.Sprintf("r%+.0f_%03.0f", ring.pitch, yaw)
-			add(Slot{
-				ID: id, Icon: "•", Yaw: yaw, Pitch: ring.pitch,
-				Label: fmt.Sprintf("%s · %.0f°", ring.label, yaw),
-				Hint:  "Line the dot up with the ring and hold steady.",
-			}, GroupExtra, false)
+			label, icon, hint := ring.label, "•", "Line the dot up with the ring and hold steady."
+			if ring.pitch == 0 {
+				label, icon, hint = ringLabelFor(yaw, 0, ringStep)
+			} else {
+				label = fmt.Sprintf("%s · %.0f°", ring.label, yaw)
+			}
+			// The horizon ring is what actually makes the 360; the upper and
+			// lower rings fill in the sky and floor.
+			add(Slot{ID: id, Icon: icon, Yaw: yaw, Pitch: ring.pitch,
+				Label: label, Hint: hint},
+				map[bool]string{true: GroupCore, false: GroupExtra}[ring.pitch == 0],
+				ring.pitch == 0)
 		}
 	}
 
@@ -144,56 +175,82 @@ func FullSpherePlan(step float64) Plan {
 		add(s, GroupUpDown, false)
 	}
 
+	required := 0
+	for _, sl := range slots {
+		if sl.Required {
+			required++
+		}
+	}
 	return Plan{
 		Mode: ModePano, Slots: slots,
-		MinRequired: len(coreRing), YawStep: step,
+		MinRequired: required, YawStep: step,
 		AlignTolerance: 10, DuplicateTolerance: step * 0.6,
 		Tips: []string{
 			"Stand still and turn on the spot. Do not walk in a circle.",
-			"Fill in as many dots as you can - more dots, fewer gaps.",
-			"Hold the phone upright and keep the horizon on the centre line.",
-			"The four bright dots are the minimum; the rest add detail.",
+			fmt.Sprintf("Turn about %.0f degrees between shots, every time.", step),
+			"Finish the bright ring first - that is the 360 itself.",
+			"The dimmer dots above and below fill in the ceiling and floor.",
 		},
 	}
 }
 
 // PanoPlan builds the shot list for a stand-in-one-place 360.
 //
-// The four cardinal shots are required; up, down and the in-between angles are
-// offered afterwards and improve the result but are never forced.
+// The ring is spaced at GaplessStep, not at the four cardinal directions.
+// Four shots 90 degrees apart leaves a 25 degree wedge between each pair that
+// no camera ever saw, so a "360" built from them is a quarter empty.
 func PanoPlan(includeUpDown, includeExtras bool) Plan {
-	slots := make([]Slot, 0, 10)
+	n := SlotsForFullCircle()
+	step := 360.0 / float64(n)
+
+	slots := make([]Slot, 0, n+2)
 	add := func(s Slot, group string, required bool) {
 		s.Index = len(slots)
 		s.Group = group
 		s.Required = required
 		slots = append(slots, s)
 	}
-	for _, s := range coreRing {
-		add(s, GroupCore, true)
+
+	for i := 0; i < n; i++ {
+		yaw := float64(i) * step
+		label, icon, hint := ringLabelFor(yaw, i, step)
+		add(Slot{ID: fmt.Sprintf("ring_%02d", i), Label: label, Icon: icon,
+			Hint: hint, Yaw: yaw}, GroupCore, true)
 	}
 	if includeUpDown {
 		for _, s := range upDown {
 			add(s, GroupUpDown, false)
 		}
 	}
-	if includeExtras {
-		for _, s := range extraRing {
-			s.Hint = fmt.Sprintf("Optional. Stand between the last two directions (%.0f°) for a smoother result.", s.Yaw)
-			add(s, GroupExtra, false)
-		}
-	}
 	return Plan{
 		Mode: ModePano, Slots: slots,
-		MinRequired: len(coreRing), YawStep: 90,
-		AlignTolerance: 15, DuplicateTolerance: 35,
+		// Every ring shot is required: skipping one puts a hole in the result.
+		MinRequired: n, YawStep: step,
+		AlignTolerance: 10, DuplicateTolerance: step * 0.6,
 		Tips: []string{
 			"Stand still and turn on the spot. Do not walk in a circle.",
-			"Always turn the SAME way — keep going right the whole time.",
-			"Hold the phone upright and at the same height for every shot.",
-			"The more photos you add, the smoother the result.",
+			fmt.Sprintf("Turn about %.0f degrees between shots - roughly one phone-width of new view.", step),
+			"Every dot matters: a skipped one leaves a blurred gap in the result.",
+			"Hold the phone upright and keep the horizon on the centre line.",
 		},
 	}
+}
+
+// ringLabelFor gives the cardinal directions their plain names and describes
+// the rest by where they sit between them.
+func ringLabelFor(yaw float64, i int, step float64) (label, icon, hint string) {
+	switch {
+	case yaw <= step/2 || yaw >= 360-step/2:
+		return "Front", "▲", "Point at whatever is in front of you. This becomes your starting direction."
+	case math.Abs(yaw-90) <= step/2:
+		return "Right side", "▶", "You are now a quarter turn to your right."
+	case math.Abs(yaw-180) <= step/2:
+		return "Behind you", "▼", "You are now looking at the opposite of where you started."
+	case math.Abs(yaw-270) <= step/2:
+		return "Left side", "◀", "One more quarter turn brings you back to the front."
+	}
+	return fmt.Sprintf("Turn to %.0f°", yaw), "•",
+		fmt.Sprintf("Keep turning the same way, about %.0f degrees more.", step)
 }
 
 // SpinPlan builds the shot list for orbiting an object on a turntable.

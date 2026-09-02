@@ -5,78 +5,70 @@ import (
 	"testing"
 )
 
-// The order the user shoots in is the product decision this test protects:
-// front, right, behind, left — then the optional extras.
-func TestPanoPlanCardinalOrder(t *testing.T) {
+// The ring must start wherever the user is facing and step evenly all the way
+// round. Cardinal names are still used where a shot lands near one, because
+// "Right side" means more to a person than "Turn to 90 degrees".
+func TestPanoRingStartsAtFrontAndStepsEvenly(t *testing.T) {
 	p := PanoPlan(true, false)
-	want := []struct {
-		id  string
-		yaw float64
-	}{
-		{"front", 0}, {"right", 90}, {"back", 180}, {"left", 270},
+
+	if p.Slots[0].Yaw != 0 {
+		t.Errorf("first shot yaw = %v, want 0", p.Slots[0].Yaw)
 	}
-	for i, w := range want {
-		got := p.Slots[i]
-		if got.ID != w.id {
-			t.Errorf("slot %d is %q, want %q", i, got.ID, w.id)
+	if p.Slots[0].Label != "Front" {
+		t.Errorf("first shot label = %q, want Front", p.Slots[0].Label)
+	}
+
+	var ring []Slot
+	for _, s := range p.Slots {
+		if s.Pitch == 0 {
+			ring = append(ring, s)
 		}
-		if got.Yaw != w.yaw {
-			t.Errorf("slot %s yaw = %v, want %v", got.ID, got.Yaw, w.yaw)
+	}
+	for i := 1; i < len(ring); i++ {
+		if step := ring[i].Yaw - ring[i-1].Yaw; math.Abs(step-p.YawStep) > 0.01 {
+			t.Errorf("shot %d is %.1f deg from the last, want %.1f", i, step, p.YawStep)
 		}
-		if !got.Required {
-			t.Errorf("slot %s must be required", got.ID)
-		}
-		if got.Index != i {
-			t.Errorf("slot %s has Index %d, want %d", got.ID, got.Index, i)
+	}
+	names := map[string]bool{}
+	for _, s := range ring {
+		names[s.Label] = true
+	}
+	for _, want := range []string{"Front", "Right side", "Behind you", "Left side"} {
+		if !names[want] {
+			t.Errorf("no shot is labelled %q", want)
 		}
 	}
 }
 
-func TestPanoMinimumIsFourNotEight(t *testing.T) {
-	p := PanoPlan(true, true)
-	if p.MinRequired != 4 {
-		t.Errorf("MinRequired = %d, want 4", p.MinRequired)
+// Every ring shot is compulsory: skipping one leaves a wedge of the world
+// unphotographed, which the finished 360 can only show as a blurred gap.
+func TestEveryRingShotIsRequired(t *testing.T) {
+	p := PanoPlan(true, false)
+	if p.MinRequired != SlotsForFullCircle() {
+		t.Errorf("MinRequired = %d, want %d (a full circle)",
+			p.MinRequired, SlotsForFullCircle())
 	}
-	if got := len(p.RequiredSlots()); got != 4 {
-		t.Errorf("required slots = %d, want 4", got)
-	}
-}
-
-func TestUpDownAndExtrasAreOptionalAndComeAfterTheRing(t *testing.T) {
-	p := PanoPlan(true, true)
-	if len(p.Slots) != 10 {
-		t.Fatalf("slot count = %d, want 10 (4 cardinal + up/down + 4 extra)", len(p.Slots))
-	}
-	for i, s := range p.Slots {
-		switch {
-		case i < 4:
-			if s.Group != GroupCore {
-				t.Errorf("slot %d group = %q, want core", i, s.Group)
+	for _, s := range p.Slots {
+		switch s.Group {
+		case GroupCore:
+			if !s.Required {
+				t.Errorf("ring shot %q must be required", s.ID)
 			}
-		case i < 6:
-			if s.Group != GroupUpDown || s.Required {
-				t.Errorf("slot %s should be an optional up/down slot", s.ID)
-			}
-		default:
-			if s.Group != GroupExtra || s.Required {
-				t.Errorf("slot %s should be an optional extra", s.ID)
+		case GroupUpDown:
+			if s.Required {
+				t.Errorf("%q is ceiling or floor and must stay optional", s.ID)
 			}
 		}
 	}
-	if p.Slots[4].Pitch != 90 {
-		t.Errorf("up pitch = %v, want 90", p.Slots[4].Pitch)
-	}
-	if p.Slots[5].Pitch != -90 {
-		t.Errorf("down pitch = %v, want -90", p.Slots[5].Pitch)
-	}
 }
 
-func TestPanoPlanCanOmitOptionalGroups(t *testing.T) {
-	if got := len(PanoPlan(false, false).Slots); got != 4 {
-		t.Errorf("bare plan has %d slots, want 4", got)
+func TestPanoPlanCanOmitUpAndDown(t *testing.T) {
+	n := SlotsForFullCircle()
+	if got := len(PanoPlan(false, false).Slots); got != n {
+		t.Errorf("bare plan has %d slots, want %d", got, n)
 	}
-	if got := len(PanoPlan(true, false).Slots); got != 6 {
-		t.Errorf("plan with up/down has %d slots, want 6", got)
+	if got := len(PanoPlan(true, false).Slots); got != n+2 {
+		t.Errorf("plan with up/down has %d slots, want %d", got, n+2)
 	}
 }
 
@@ -118,8 +110,8 @@ func TestPlanForDispatchesOnMode(t *testing.T) {
 	if PlanFor("nonsense", 6, true).Mode != ModePano {
 		t.Error("unknown mode should fall back to pano")
 	}
-	if got := len(PlanFor(ModePano, 10, true).Slots); got != 10 {
-		t.Errorf("asking for 10 should include the extras, got %d slots", got)
+	if got := len(PlanFor(ModePano, 10, true).Slots); got < SlotsForFullCircle() {
+		t.Errorf("a pano plan must cover a full circle, got %d slots", got)
 	}
 }
 
@@ -191,26 +183,23 @@ func TestProgressReachesHundredOnlyWhenDone(t *testing.T) {
 func TestFullSpherePlanCoversTheWholeSphere(t *testing.T) {
 	p := FullSpherePlan(30)
 
-	if p.MinRequired != 4 {
-		t.Errorf("MinRequired = %d, want 4 - only the cardinals are compulsory", p.MinRequired)
-	}
-	// 4 cardinals + 8 remaining horizon + 12 upper + 12 lower + up + down
-	if len(p.Slots) != 38 {
-		t.Fatalf("slot count = %d, want 38", len(p.Slots))
-	}
-
-	// The four cardinals must lead, so stopping early still gives an even ring.
-	for i, want := range []string{"front", "right", "back", "left"} {
-		if p.Slots[i].ID != want {
-			t.Errorf("slot %d is %q, want %q", i, p.Slots[i].ID, want)
-		}
-		if !p.Slots[i].Required {
-			t.Errorf("cardinal %q must be required", want)
+	// The horizon ring is compulsory; the sky and floor rings are not.
+	horizon := 0
+	for _, s := range p.Slots {
+		if s.Pitch == 0 {
+			horizon++
 		}
 	}
-	for _, s := range p.Slots[4:] {
-		if s.Required {
-			t.Errorf("slot %q beyond the cardinals must be optional", s.ID)
+	if p.MinRequired != horizon {
+		t.Errorf("MinRequired = %d, want %d (the whole horizon ring)",
+			p.MinRequired, horizon)
+	}
+	for _, s := range p.Slots {
+		if s.Pitch == 0 && !s.Required {
+			t.Errorf("horizon shot %q must be required", s.ID)
+		}
+		if s.Pitch != 0 && s.Required {
+			t.Errorf("off-horizon shot %q must be optional", s.ID)
 		}
 	}
 
@@ -230,7 +219,7 @@ func TestFullSpherePlanCoversTheWholeSphere(t *testing.T) {
 			t.Errorf("slot %q has no user-facing text", s.ID)
 		}
 	}
-	for _, want := range []float64{0, 40, -40, 90, -90} {
+	for _, want := range []float64{0, 45, -45, 90, -90} {
 		if pitches[want] == 0 {
 			t.Errorf("no slots at pitch %v", want)
 		}
@@ -248,8 +237,8 @@ func TestFullSpherePlanClampsSpacing(t *testing.T) {
 	if got := FullSpherePlan(1).YawStep; got != 15 {
 		t.Errorf("tiny spacing = %v, want clamped to 15", got)
 	}
-	if got := FullSpherePlan(400).YawStep; got != 90 {
-		t.Errorf("huge spacing = %v, want clamped to 90", got)
+	if got := FullSpherePlan(400).YawStep; got > GaplessStep()+0.01 {
+		t.Errorf("spacing %v exceeds the gapless limit %v", got, GaplessStep())
 	}
 }
 

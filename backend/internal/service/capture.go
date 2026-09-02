@@ -253,8 +253,10 @@ func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Captur
 	plan := s.Plan(c)
 	if len(frames) < plan.MinRequired {
 		return nil, fmt.Errorf(
-			"need at least %d photos to build a 360 view, got %d - the four directions (front, right, behind, left) are the minimum",
-			plan.MinRequired, len(frames))
+			"need %d photos to cover the whole way round, got %d. "+
+				"Each photo only sees about %.0f°, so turning further than %.0f° "+
+				"between shots leaves a gap nothing was photographed in",
+			plan.MinRequired, len(frames), domain.CameraHFOV, plan.YawStep)
 	}
 
 	if err := s.repo.SetFrameCount(ctx, captureID, len(frames)); err != nil {
