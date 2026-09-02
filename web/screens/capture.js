@@ -125,6 +125,9 @@ const ScreenCapture = (() => {
     // dots track the phone rather than being redrawn on discrete events.
     let raf = 0;
     let liveTarget = null;   // the dot nearest the centre right now
+    // The ring drawn on screen is the horizon row only - that is the circle the
+    // user physically walks round. Ceiling and floor dots are not part of it.
+    const ringSlots = state.slots.filter((s) => Math.abs(s.pitch || 0) < 20);
     let holdSince = 0;
     let holdSlotId = null;
     let firing = false;
@@ -158,6 +161,7 @@ const ScreenCapture = (() => {
       }
 
       drawReticle(ctx, view, live);
+      drawCoverageRing(ctx, view);
 
       if (!live || !q) { renderStatus(); return; }
       if (!refFrame) { renderStatus(); return; }
@@ -191,8 +195,14 @@ const ScreenCapture = (() => {
       if (nearest) {
         const dir = SphereMath.directionFor(refFrame, nearest.yaw, nearest.pitch || 0);
         const p = SphereMath.project(q, dir, view);
-        if (p.visible) drawDot(ctx, p, nearest, false, true);
-        else drawEdgeArrow(ctx, view, q, dir, nearest);
+        if (p.visible) {
+          drawDot(ctx, p, nearest, false, true);
+        } else {
+          // Which way is shorter to turn?
+          const inv = Orientation.qConjugate(q);
+          const d = Orientation.qRotate(inv, dir);
+          drawTurnHint(ctx, view, d[0] >= 0 ? 1 : -1, p.angle);
+        }
         if (p.angle <= RETICLE_DEG) onTarget = nearest;
       }
 
@@ -212,6 +222,85 @@ const ScreenCapture = (() => {
     }
 
     // --- drawing ---
+
+    // A ring showing the whole circle you have to walk round, with the parts
+    // you have already photographed filled in.
+    //
+    // This exists because of the single most common way a capture goes wrong:
+    // the user turns most of the way, stops, and has no idea a third of the
+    // room was never shot. A list of dots cannot show that. A circle with a
+    // bite missing out of it can be read in half a second.
+    function drawCoverageRing(c, view) {
+      // Bottom-left, clear of the instruction panel above and the shutter row
+      // below. Top-right put it under the message panel, which hid the very
+      // thing it exists to show.
+      const R = 34;
+      const cx = R + 20;
+      const cy = view.height - R - 176;
+      const arc = (Math.PI * 2) / Math.max(1, ringSlots.length);
+
+      c.save();
+      c.lineWidth = 9;
+      c.lineCap = "butt";
+
+      ringSlots.forEach((slot, i) => {
+        // -90deg so "front" sits at the top, the way a compass reads.
+        const a0 = (slot.yaw / 180) * Math.PI - Math.PI / 2 - arc / 2 + 0.03;
+        const a1 = a0 + arc - 0.06;
+        c.strokeStyle = state.shots.has(slot.id)
+          ? "rgba(61,220,132,.95)"     // photographed
+          : "rgba(255,255,255,.22)";   // still missing
+        c.beginPath();
+        c.arc(cx, cy, R, a0, a1);
+        c.stroke();
+      });
+
+      // Where the phone is pointing right now.
+      if (refFrame && tracker.quaternion) {
+        const h = SphereMath.headingOf(refFrame, tracker.quaternion);
+        const a = (h.yaw / 180) * Math.PI - Math.PI / 2;
+        c.strokeStyle = "#fff";
+        c.lineWidth = 2;
+        c.beginPath();
+        c.moveTo(cx + Math.cos(a) * (R - 13), cy + Math.sin(a) * (R - 13));
+        c.lineTo(cx + Math.cos(a) * (R + 8), cy + Math.sin(a) * (R + 8));
+        c.stroke();
+      }
+
+      // Count the ring, not every slot. The ring is what the circle shows, and
+      // "0 of 32" next to twelve segments simply did not add up.
+      const ringDone = ringSlots.filter((sl) => state.shots.has(sl.id)).length;
+      c.fillStyle = "#fff";
+      c.textAlign = "center";
+      c.font = "700 16px system-ui, sans-serif";
+      c.fillText(`${ringDone}`, cx, cy + 1);
+      c.font = "500 10px system-ui, sans-serif";
+      c.fillStyle = "rgba(255,255,255,.7)";
+      c.fillText(`of ${ringSlots.length}`, cx, cy + 15);
+      c.restore();
+    }
+
+    // A big arrow at the edge when the next dot is off screen. Users looked
+    // straight past the small one.
+    function drawTurnHint(c, view, side, degrees) {
+      const y = view.height / 2;
+      const x = side > 0 ? view.width - 46 : 46;
+      c.save();
+      c.translate(x, y);
+      c.rotate(side > 0 ? 0 : Math.PI);
+      c.fillStyle = "rgba(76,141,255,.95)";
+      c.beginPath();
+      c.moveTo(24, 0); c.lineTo(-14, 17); c.lineTo(-14, -17);
+      c.closePath(); c.fill();
+      c.restore();
+      c.save();
+      c.fillStyle = "#fff";
+      c.font = "700 13px system-ui, sans-serif";
+      c.textAlign = "center";
+      c.fillText(`${Math.round(degrees)}°`, x, y + 38);
+      c.restore();
+    }
+
     function drawReticle(c, view, live) {
       const cx = view.width / 2, cy = view.height / 2;
       const r = Math.min(view.width, view.height) * 0.13;
@@ -304,29 +393,42 @@ const ScreenCapture = (() => {
     // --- status + targets ---
     function renderStatus() {
       const live = tracker.isLive();
-      const label = { gyro: "Gyroscope", absolute: "Compass + gyro", deviceorientation: "Basic sensor" }[tracker.source];
 
+      // Say nothing while things are working. The old version announced
+      // "Gyroscope tracking" at every moment, which told the user nothing they
+      // could act on and buried the messages that mattered.
       if (!live) {
         statusPill.className = "status-pill off";
-        statusPill.textContent = "No motion sensor — tap the shutter for each shot";
+        statusPill.textContent = "No motion sensor — tap the button for each photo";
       } else if (!refFrame) {
         statusPill.className = "status-pill warn";
-        statusPill.textContent = `${label} ready — point at your starting view and tap Set Front`;
+        statusPill.textContent = "Point at anything and take your first photo to begin";
       } else {
-        statusPill.className = "status-pill on";
-        const n = state.shots.size;
-        statusPill.textContent = `${label} tracking · ${n} of ${state.slots.length} captured`;
+        statusPill.className = "status-pill hidden";
+        statusPill.textContent = "";
       }
-      setFrontBtn.hidden = !live;
+      setFrontBtn.hidden = !live || !refFrame;
 
       const t = liveTarget || nextSlot();
-      const left = state.slots.length - state.shots.size;
-      targetLabel.textContent = t ? t.label : "Every dot captured";
-      targetHint.textContent = t
-        ? (t.hint || "")
-        : "Tap Build my 360 when you are ready.";
-      if (t && left > 0) targetHint.textContent += "  (" + left + " dots left)";
-      counter.textContent = `${state.shots.size} of ${state.slots.length}`;
+      const need = plan.min_required || 1;
+      const ringLeft = ringSlots.filter((s) => !state.shots.has(s.id)).length;
+
+      if (!t) {
+        targetLabel.textContent = "All done";
+        targetHint.textContent = "Tap Build my 360 below.";
+      } else if (ringLeft > 0) {
+        // While the circle is unfinished, that is the only thing worth saying.
+        targetLabel.textContent = "Keep turning the same way";
+        targetHint.textContent = ringLeft === 1
+          ? "One more photo closes the circle."
+          : `${ringLeft} more photos to close the circle.`;
+      } else {
+        targetLabel.textContent = "Circle complete";
+        targetHint.textContent = state.shots.size < state.slots.length
+          ? "Now point up at the ceiling and down at the floor."
+          : "Tap Build my 360 below.";
+      }
+      void need;
     }
 
     function renderThumbs() {
@@ -337,13 +439,17 @@ const ScreenCapture = (() => {
     }
 
     function updateFinishState() {
-      const n = state.shots.size;
       const need = plan.min_required || 4;
-      finishBtn.disabled = n < need;
-      finishBtn.textContent = n < need
-        ? `${need - n} more to go`
-        : `Build my 360 →`;
-      retakeBtn.disabled = n === 0;
+      const ringLeft = ringSlots.filter((s) => !state.shots.has(s.id)).length;
+      const short = Math.max(0, need - state.shots.size);
+
+      // The circle has to be closed. Letting someone build a 360 with a hole in
+      // it and only telling them afterwards is how this went wrong before.
+      finishBtn.disabled = ringLeft > 0 || short > 0;
+      finishBtn.textContent = ringLeft > 0
+        ? `${ringLeft} more to close the circle`
+        : "Build my 360 →";
+      retakeBtn.disabled = state.shots.size === 0;
     }
 
     function updateGhost() {
@@ -465,26 +571,33 @@ const ScreenCapture = (() => {
         </div>
         <canvas id="dotCanvas" class="dot-canvas"></canvas>
         <div id="flash" class="shot-flash"></div>
+
         <div class="cam-overlay">
           <div class="cam-top">
             <button class="back" onclick="location.hash='#/'" title="Back to home">←</button>
             <div class="cam-title">${escapeHtml(capture.title)}</div>
             <button id="gridBtn" class="side-btn grid-btn" title="Framing grid" aria-pressed="false">⊞</button>
-            <span id="counter" class="counter">0 of ${slotCount}</span>
           </div>
+
+          <!-- One short line. Big enough to read at arm's length, high enough
+               that it never sits over the reticle. -->
+          <div class="say-panel">
+            <div id="targetLabel" class="say-big"></div>
+            <div id="targetHint" class="say-small"></div>
+          </div>
+
           <div id="statusPill" class="status-pill"></div>
-          <div class="target-panel">
-            <div id="targetLabel" class="target-label"></div>
-            <div id="targetHint" class="target-hint"></div>
+
+          <div class="cam-foot">
+            <div id="thumbStrip" class="thumb-strip"></div>
+            <div class="cam-bottom">
+              <button id="retakeBtn" class="side-btn" title="Undo last photo">↺</button>
+              <button id="shutterBtn" class="shutter" aria-label="Take photo"></button>
+              <button id="setFrontBtn" class="side-btn" title="Start the circle here" hidden>⌖</button>
+            </div>
+            <div id="camErr" class="cam-err"></div>
+            <button id="finishBtn" class="primary finish-btn" disabled></button>
           </div>
-          <div id="camErr" class="cam-err"></div>
-          <div id="thumbStrip" class="thumb-strip"></div>
-          <div class="cam-bottom">
-            <button id="retakeBtn" class="side-btn" title="Undo last shot">↺</button>
-            <button id="shutterBtn" class="shutter" aria-label="Take photo"></button>
-            <button id="setFrontBtn" class="side-btn" title="Set this direction as Front" hidden>⌖</button>
-          </div>
-          <button id="finishBtn" class="primary finish-btn" disabled></button>
         </div>
       </div>`;
   }

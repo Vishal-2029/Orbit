@@ -15,11 +15,11 @@ const ScreenHome = (() => {
               <div class="mode-row">
                 <button class="mode-btn selected" data-mode="sphere">
                   <div class="title">🌐 Full 360</div>
-                  <div class="desc">Dots all around you. Shoot in any direction you like.</div>
+                  <div class="desc">Dots all around you, plus ceiling and floor. Best result.</div>
                 </button>
                 <button class="mode-btn" data-mode="pano">
                   <div class="title">📷 Quick 360</div>
-                  <div class="desc">Just four directions: front, right, behind, left.</div>
+                  <div class="desc">One ring around you. Fewer photos, no ceiling or floor.</div>
                 </button>
                 <button class="mode-btn" data-mode="spin">
                   <div class="title">🔄 Object spin</div>
