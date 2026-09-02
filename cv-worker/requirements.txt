@@ -1,0 +1,7 @@
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+Pillow==10.4.0
+redis==5.0.8
+requests==2.32.3
+minio==7.2.9
+defusedxml>=0.7   # lets Pillow read XMP back in tests
