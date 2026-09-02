@@ -16,3 +16,6 @@ scripts/testdata/
 # Real capture photos used for local testing. These are personal photos and
 # must never be published to a shared repository.
 scripts/realtest/
+
+backend/.env
+

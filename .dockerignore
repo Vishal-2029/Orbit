@@ -1,0 +1,11 @@
+.git
+.logs
+node_modules
+cv-worker/.venv
+cv-worker/__pycache__
+**/__pycache__
+*.pyc
+backend/bin
+scripts/realtest
+scripts/testdata
+data

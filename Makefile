@@ -21,6 +21,7 @@ reset: ## Stop the infra AND delete all stored photos and captures
 
 migrate: ## Apply database migrations
 	@docker exec -i orbit-postgres psql -U orbit -d orbit -q < backend/migrations/001_init.sql
+	@docker exec -i orbit-postgres psql -U orbit -d orbit -q < backend/migrations/002_quaternion.sql
 
 api: ## Run the Go API on :8080
 	cd backend && go run ./cmd/api
