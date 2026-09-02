@@ -12,6 +12,7 @@ This module runs the matching step first, so we know before stitching which
 photos form one connected scene and can tell the user the truth about the rest.
 """
 import logging
+import math
 
 import cv2
 import numpy as np
@@ -123,3 +124,65 @@ def describe_leftovers(total, used):
         "gaps between them. Shoot one continuous turn from a single spot, letting "
         "each photo overlap the previous one by about a third."
     )
+
+
+def sphere_coverage(quats, hfov_deg=65.0, aspect=None):
+    """Fraction of the whole sphere that at least one photo actually saw.
+
+    This is the number behind the blurred bands. Four photos taken 90 degrees
+    apart, from a camera that only sees 65, leave a quarter of the world
+    unphotographed - and no amount of processing can put that back. Measuring it
+    lets the app say so plainly instead of quietly smearing over the hole.
+
+    A world direction counts as seen when it falls inside a photo's rectangular
+    frustum, tested in that camera's own frame. Testing an angular radius
+    instead would wrongly count the corners of the field of view as covering
+    everything between them.
+    """
+    import numpy as np
+
+    mats = []
+    for q in quats:
+        if q is None:
+            continue
+        x, y, z, w = q
+        n = math.sqrt(x * x + y * y + z * z + w * w)
+        if n == 0:
+            continue
+        x, y, z, w = x / n, y / n, z / n, w / n
+        # world <- device
+        R = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ])
+        mats.append(R.T)           # device <- world
+    if not mats:
+        return 0.0
+
+    vfov = hfov_deg if not aspect else 2 * math.degrees(
+        math.atan(math.tan(math.radians(hfov_deg) / 2) * aspect))
+    tan_h = math.tan(math.radians(hfov_deg) / 2)
+    tan_v = math.tan(math.radians(vfov) / 2)
+
+    n_lat, n_lon = 90, 180
+    lats = (np.arange(n_lat) + 0.5) * math.pi / n_lat - math.pi / 2
+    lons = (np.arange(n_lon) + 0.5) * 2 * math.pi / n_lon
+    LA, LO = np.meshgrid(lats, lons, indexing="ij")
+    pts = np.stack([np.cos(LA) * np.cos(LO),
+                    np.cos(LA) * np.sin(LO),
+                    np.sin(LA)], axis=-1).reshape(-1, 3)
+    weights = np.cos(LA).reshape(-1)
+
+    seen = np.zeros(len(pts), dtype=bool)
+    for Rt in mats:
+        d = pts @ Rt.T                      # direction in the device frame
+        depth = -d[:, 2]                    # camera looks along device -Z
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inside = ((depth > 1e-6)
+                      & (np.abs(d[:, 0]) <= tan_h * depth)
+                      & (np.abs(d[:, 1]) <= tan_v * depth))
+        seen |= inside
+
+    total = weights.sum()
+    return float((weights * seen).sum() / total) if total else 0.0

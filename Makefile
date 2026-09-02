@@ -38,6 +38,7 @@ test: ## Run the Go, JavaScript and CV test suites
 		cv-worker/.venv/bin/python cv-worker/tests/test_pose_stitch.py; \
 		cv-worker/.venv/bin/python cv-worker/tests/test_xmp.py; \
 		cv-worker/.venv/bin/python cv-worker/tests/test_finish.py; \
+		cv-worker/.venv/bin/python cv-worker/tests/test_coverage.py; \
 	else echo "skipping CV tests (no virtualenv)"; fi
 
 build: ## Compile the Go binaries into backend/bin/

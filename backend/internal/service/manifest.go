@@ -25,6 +25,10 @@ type FinalizeInput struct {
 	PhotosUsed   int    `json:"photos_used"`
 	PhotosTotal  int    `json:"photos_total"`
 	CoverageNote string `json:"coverage_note"`
+	// SphereCoverage is 0..1: how much of the whole sphere at least one photo
+	// actually saw. Anything the camera never pointed at cannot be recovered,
+	// so this is the honest ceiling on how complete the 360 can look.
+	SphereCoverage float64 `json:"sphere_coverage"`
 }
 
 // MinCoverage is the share of the user's photos that must make it into the
@@ -87,6 +91,18 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		m.Renderer = "sphere"
 		m.Panorama = s.PublicURL(captureID, "panorama", 0)
 		m.Width, m.Height = in.Width, in.Height
+		m.Coverage = in.SphereCoverage
+		// Photos cannot cover ground the camera never pointed at. Say how much
+		// is missing rather than letting the user wonder what the blur is.
+		if in.SphereCoverage > 0 && in.SphereCoverage < 0.9 {
+			m.Degraded = true
+			m.DegradedWhy = fmt.Sprintf(
+				"These photos cover about %.0f%% of the view around you. The soft "+
+					"patches are directions the camera never pointed at. Take a photo "+
+					"at every dot - including the ceiling and floor - for a complete 360.",
+				in.SphereCoverage*100)
+			status = domain.StatusPartial
+		}
 		// Some photos were dropped, but enough remain to be a real 360. Show
 		// the sphere and mention the rest rather than hiding it.
 		if in.PhotosTotal > 0 && in.PhotosUsed < in.PhotosTotal && in.CoverageNote != "" {

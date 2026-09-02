@@ -26,7 +26,7 @@ from ops.normalize import (
 )
 from ops.stitch import stitch_panorama
 from ops.finish import finish_panorama
-from ops.coverage import connected_groups, describe_leftovers
+from ops.coverage import connected_groups, describe_leftovers, sphere_coverage
 from ops.pose_stitch import stitch_with_poses
 from ops.xmp import add_photosphere_metadata
 
@@ -359,6 +359,15 @@ def handle_finalize_job(mc, job):
                 log.warning("%s panorama clean-up failed (%s: %s); using raw",
                             PREFIX, type(e).__name__, e)
             h, w = pano.shape[:2]
+            # How much of the world these photos actually saw. Anything they
+            # missed shows up as a soft patch, and only more photos can fix it.
+            src_h, src_w = images[0].shape[:2]
+            coverage = sphere_coverage(
+                [q for q in quats if q is not None],
+                hfov_deg=65.0, aspect=src_h / float(src_w))
+            log.info("%s capture=%s covers %.0f%% of the sphere",
+                     PREFIX, capture_id, coverage * 100)
+
             pano_bytes = add_photosphere_metadata(
                 encode_jpeg(pano, settings.jpeg_quality), w, h,
                 source_count=posed, heading_deg=_true_north_heading(ring))
@@ -374,6 +383,7 @@ def handle_finalize_job(mc, job):
                     "width": w, "height": h,
                     "photos_used": posed, "photos_total": len(ring),
                     "coverage_note": describe_leftovers(len(ring), posed),
+                    "sphere_coverage": coverage,
                 })
                 log.info("%s pose stitch succeeded capture=%s size=%sx%s using %d of %d",
                          PREFIX, capture_id, w, h, posed, len(ring))
