@@ -20,7 +20,14 @@ log = logging.getLogger("orbit-worker")
 
 # Below this many confirmed inlier matches, two photos are not considered to
 # show overlapping parts of the same scene.
+#
+# Two passes are tried. The strict one keeps genuinely unrelated photos apart.
+# If that leaves the set fragmented, a looser threshold gets a second chance to
+# join groups that overlap only slightly - which is common when a user shoots
+# an uneven ring by hand. Joining on weak evidence is still better than
+# discarding two thirds of their photos.
 MATCH_CONF = 0.35
+MATCH_CONF_RELAXED = 0.20
 
 
 def _detector():
@@ -35,6 +42,9 @@ def connected_groups(images, work_width=640):
 
     Returns a list of index lists, largest group first. Photos that match
     nothing end up in their own single-element group.
+
+    Runs a strict pass first; if that leaves most of the photos stranded, it
+    retries with a looser match threshold before accepting the fragmentation.
     """
     n = len(images)
     if n < 2:
@@ -53,15 +63,32 @@ def connected_groups(images, work_width=640):
     det = _detector()
     try:
         features = [cv2.detail.computeImageFeatures2(det, im) for im in small]
-        matcher = cv2.detail_BestOf2NearestMatcher(False, MATCH_CONF)
-        pairwise = matcher.apply2(features)
-        matcher.collectGarbage()
     except cv2.error as e:
         log.warning("[orbit-worker] coverage check unavailable (%s); "
                     "assuming all photos belong together", e)
         return [list(range(n))]
 
-    # Union-find over pairs the matcher confirmed.
+    out = _match_graph(features, n, MATCH_CONF)
+
+    # If the strict pass stranded most of the photos, give them a second chance
+    # on weaker evidence before writing two thirds of the capture off.
+    if out and len(out[0]) < n * 0.6:
+        relaxed = _match_graph(features, n, MATCH_CONF_RELAXED)
+        if relaxed and len(relaxed[0]) > len(out[0]):
+            log.info("[orbit-worker] strict matching connected only %d of %d; "
+                     "a looser pass connected %d", len(out[0]), n, len(relaxed[0]))
+            out = relaxed
+    log.info("[orbit-worker] coverage: %d photo(s) form %d group(s): %s",
+             n, len(out), [len(g) for g in out])
+    return out
+
+
+def _match_graph(features, n, conf):
+    """Union-find over pairs a matcher confirms at the given confidence."""
+    matcher = cv2.detail_BestOf2NearestMatcher(False, conf)
+    pairwise = matcher.apply2(features)
+    matcher.collectGarbage()
+
     parent = list(range(n))
 
     def find(a):
@@ -70,25 +97,18 @@ def connected_groups(images, work_width=640):
             a = parent[a]
         return a
 
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
     for i in range(n):
         for j in range(i + 1, n):
             m = pairwise[i * n + j]
             if m.confidence >= 1.0 and m.num_inliers >= 6:
-                union(i, j)
+                ra, rb = find(i), find(j)
+                if ra != rb:
+                    parent[rb] = ra
 
     groups = {}
     for i in range(n):
         groups.setdefault(find(i), []).append(i)
-
-    out = sorted(groups.values(), key=len, reverse=True)
-    log.info("[orbit-worker] coverage: %d photo(s) form %d group(s): %s",
-             n, len(out), [len(g) for g in out])
-    return out
+    return sorted(groups.values(), key=len, reverse=True)
 
 
 def describe_leftovers(total, used):
