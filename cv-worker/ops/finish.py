@@ -139,12 +139,38 @@ def fill_remaining_black(img):
     image. Nearest-neighbour inpainting is not clever, but a smeared edge is far
     less distracting in a 360 than a black wedge.
     """
-    mask = (~content_mask(img)).astype(np.uint8)
-    if not mask.any():
+    holes = ~content_mask(img)
+    if not holes.any():
         return img
-    # Grow slightly so the feathered edge of the warp is repainted too.
-    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
-    return cv2.inpaint(img, mask, 5, cv2.INPAINT_TELEA)
+    mask = cv2.dilate(holes.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1)
+
+    # Inpainting is designed for scratches, not for the wide bands left where
+    # the user simply did not point the camera. Run over a large area it
+    # produces long directional streaks - the smearing that makes a sparse
+    # capture look melted.
+    #
+    # So: small holes get real inpainting, and large ones get a soft blurred
+    # fill instead. A gentle wash reads as "nothing was photographed here",
+    # which is honest, rather than as damaged photo.
+    hole_fraction = holes.mean()
+    if hole_fraction < 0.02:
+        return cv2.inpaint(img, mask, 5, cv2.INPAINT_TELEA)
+
+    small = cv2.resize(img, (max(1, img.shape[1] // 8), max(1, img.shape[0] // 8)),
+                       interpolation=cv2.INTER_AREA)
+    small_mask = cv2.resize(mask, (small.shape[1], small.shape[0]),
+                            interpolation=cv2.INTER_NEAREST)
+    filled_small = cv2.inpaint(small, small_mask, 3, cv2.INPAINT_TELEA)
+    filled = cv2.resize(filled_small, (img.shape[1], img.shape[0]),
+                        interpolation=cv2.INTER_LINEAR)
+    filled = cv2.GaussianBlur(filled, (0, 0), sigmaX=img.shape[1] / 220.0)
+
+    soft = cv2.GaussianBlur(mask.astype(np.float32) * 255, (0, 0), sigmaX=9) / 255.0
+    soft = np.clip(soft, 0, 1)[..., None]
+    out = img.astype(np.float32) * (1 - soft) + filled.astype(np.float32) * soft
+    log.info("[orbit-worker] %.0f%% of the sphere had no photo covering it; "
+             "filled softly rather than inpainted", hole_fraction * 100)
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def _trim_wrap_overlap(img, search_frac=0.25, strip_frac=0.05):
