@@ -265,6 +265,43 @@ def test_large_portrait_photos_do_not_explode():
     print("       peak RSS %.0f MB (was 8000+ MB before the cap)" % after)
 
 
+def test_full_sphere_capture_with_pole_shots():
+    """The capture that killed the worker a second time.
+
+    Thirteen tall portrait photos including shots straight up and straight
+    down. Pole shots warp toward a pole, where a spherical projection stretches
+    without bound, so their tiles dwarf the horizon ring. Seam finding on
+    full-size copies of all of them allocated over 8GB.
+    """
+    import resource
+
+    w, h = 1600, 2844
+    imgs, quats = [], []
+    for i in range(9):                       # the horizon ring
+        img = np.full((h, w, 3), 40, np.uint8)
+        cv2.circle(img, (w // 2, h // 2), 300, (0, 180, 255), -1)
+        imgs.append(img)
+        quats.append(yawed(i * 40))
+    for pitch in (45, -45, 89, -89):         # sky, floor and both poles
+        img = np.full((h, w, 3), 70, np.uint8)
+        cv2.circle(img, (w // 2, h // 2), 300, (255, 180, 0), -1)
+        imgs.append(img)
+        quats.append(pitched(pitch))
+
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    ok, pano, reason = ps.stitch_with_poses(imgs, quats)
+    after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+    check("a 13-photo sphere with pole shots stitches", ok is True, str(reason))
+    check("peak memory stays under 3GB", after < 3072, "peak %.0f MB" % after)
+    print("       13 photos incl. poles, peak RSS %.0f MB" % after)
+    if ok:
+        check("the result is a sane size",
+              pano.shape[1] <= ps.MAX_CIRCUMFERENCE_PX + 8
+              and pano.shape[0] <= ps.MAX_CIRCUMFERENCE_PX,
+              "%dx%d" % (pano.shape[1], pano.shape[0]))
+
+
 if __name__ == "__main__":
     for fn in [test_quaternion_matrix, test_camera_rotation_is_a_rotation,
                test_intrinsics, test_yaw_maps_to_even_horizontal_spacing,
@@ -273,7 +310,8 @@ if __name__ == "__main__":
                test_first_photo_is_not_split_across_the_seam,
                test_photo_content_keeps_its_orientation,
                test_refuses_without_enough_poses, test_end_to_end_placement,
-               test_large_portrait_photos_do_not_explode]:
+               test_large_portrait_photos_do_not_explode,
+               test_full_sphere_capture_with_pole_shots]:
         print("\n%s:" % fn.__name__)
         fn()
     print("\n%d failure(s)" % len(FAILURES))

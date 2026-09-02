@@ -40,6 +40,11 @@ MAX_CIRCUMFERENCE_PX = 4096
 # is wrong, not that the photo is detailed.
 MAX_CANVAS_PX = 40_000_000
 
+# Combined size of all warped tiles held in memory at once. Photos aimed at the
+# sky or the floor warp toward a pole, where a spherical projection stretches
+# without bound, so a handful of pole shots can dwarf the whole horizon ring.
+MAX_TILE_PIXELS = 120_000_000
+
 
 def quaternion_to_matrix(x, y, z, w):
     """Quaternion [x,y,z,w] -> 3x3 rotation matrix (device frame -> world)."""
@@ -153,6 +158,14 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             masks.append(wmask)
             corners.append(corner)
 
+        total_px = sum(im.shape[0] * im.shape[1] for im in warped)
+        if total_px > MAX_TILE_PIXELS:
+            log.warning("[orbit-worker] %d warped tiles total %.0f Mpx, over the "
+                        "%.0f Mpx budget; refusing rather than exhausting memory",
+                        len(warped), total_px / 1e6, MAX_TILE_PIXELS / 1e6)
+            return False, None, ("There are too many large photos in this capture "
+                                 "to place them all at once. Try again with fewer.")
+
         pano = _blend(warped, masks, corners)
         if pano is None:
             return False, None, "The photos could not be combined onto the sphere."
@@ -177,16 +190,31 @@ def _compensate_exposure(warped, masks, corners):
 
     Phones re-meter for every photo, so the sunlit side and the shaded side
     arrive at different exposures and every seam shows as a brightness step.
+
+    One gain per photo, not per block. GAIN_BLOCKS builds a grid of gain maps
+    across every tile at full resolution, which on a 13-photo sphere - where
+    the shots aimed at the ceiling and floor warp into very large tiles -
+    exhausted memory and got the worker killed. A single gain is also the right
+    correction for the problem we actually have: whole-frame metering drift,
+    not vignetting.
+
     Applied in place; failure here is cosmetic, so it is swallowed.
     """
     try:
         comp = cv2.detail.ExposureCompensator_createDefault(
-            cv2.detail.ExposureCompensator_GAIN_BLOCKS)
+            cv2.detail.ExposureCompensator_GAIN)
         comp.feed(corners, warped, masks)
         for i in range(len(warped)):
             comp.apply(i, corners[i], warped[i], masks[i])
     except Exception as e:
         log.debug("[orbit-worker] exposure compensation skipped: %s", e)
+
+
+# Seam finding runs on tiny copies. OpenCV's own stitcher does the same, at
+# about a tenth of a megapixel: the cut line only needs to be roughly right,
+# and the finder is expensive enough that running it at full size is what
+# pushed a 13-photo capture past 8GB.
+SEAM_WORK_MEGAPIX = 0.1
 
 
 def _find_seams(warped, masks, corners):
@@ -195,20 +223,35 @@ def _find_seams(warped, masks, corners):
     Without this, every overlap is a wide cross-fade of two photos. Anything
     that does not line up perfectly - and handheld photos never do - is
     averaged into a soft double image, which reads as a blurred band wherever
-    two photos meet.
+    two photos meet. A seam finder instead picks a cut through the overlap
+    where the two photos agree most closely, so the join is a clean handover.
 
-    A seam finder instead picks a cut line through the overlap where the two
-    photos agree most closely, so the join is a clean handover rather than a
-    blur. Masks are edited in place; failure is non-fatal and simply leaves the
-    original cross-fade behaviour.
+    Masks are edited in place. Failure is non-fatal and simply leaves the
+    plain cross-fade behaviour.
     """
     try:
-        finder = cv2.detail_DpSeamFinder("COLOR_GRAD")
-        small = [im.astype(np.float32) for im in warped]
-        umats = [cv2.UMat(m) for m in masks]
-        finder.find(small, corners, umats)
-        for i, um in enumerate(umats):
-            masks[i] = um.get()
+        total_px = sum(im.shape[0] * im.shape[1] for im in warped)
+        scale = min(1.0, math.sqrt(SEAM_WORK_MEGAPIX * 1e6 * len(warped) / max(1, total_px)))
+
+        small_imgs, small_masks, small_corners = [], [], []
+        for im, mk, c in zip(warped, masks, corners):
+            sw = max(8, int(im.shape[1] * scale))
+            sh = max(8, int(im.shape[0] * scale))
+            small_imgs.append(cv2.resize(im, (sw, sh), interpolation=cv2.INTER_AREA)
+                              .astype(np.float32))
+            small_masks.append(cv2.UMat(
+                cv2.resize(mk, (sw, sh), interpolation=cv2.INTER_NEAREST)))
+            small_corners.append((int(c[0] * scale), int(c[1] * scale)))
+
+        cv2.detail_DpSeamFinder("COLOR_GRAD").find(
+            small_imgs, small_corners, small_masks)
+
+        # Scale each seam mask back up and intersect with the real coverage, so
+        # the seam can only ever remove pixels, never invent them.
+        for i, um in enumerate(small_masks):
+            grown = cv2.resize(um.get(), (masks[i].shape[1], masks[i].shape[0]),
+                               interpolation=cv2.INTER_LINEAR)
+            masks[i] = cv2.bitwise_and(masks[i], (grown > 127).astype(np.uint8) * 255)
         return True
     except Exception as e:
         log.debug("[orbit-worker] seam finding skipped: %s", e)
