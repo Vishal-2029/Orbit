@@ -124,6 +124,7 @@ const ScreenCapture = (() => {
     // Everything visible is recomputed per frame from the live rotation, so the
     // dots track the phone rather than being redrawn on discrete events.
     let raf = 0;
+    let liveTarget = null;   // the dot nearest the centre right now
     let holdSince = 0;
     let holdSlotId = null;
     let firing = false;
@@ -161,21 +162,38 @@ const ScreenCapture = (() => {
       if (!live || !q) { renderStatus(); return; }
       if (!refFrame) { renderStatus(); return; }
 
-      const target = nextSlot();
       let onTarget = null;
+
+      // With a full sphere of dots, drawing all of them at once is noise. Only
+      // those near where the phone is pointing are shown - the rest still
+      // exist, they are simply out of view, exactly like Street View capture.
+      const VISIBLE_DEG = 55;
+      let nearest = null;
+      let nearestAngle = 1e9;
 
       for (const slot of state.slots) {
         const taken = state.shots.has(slot.id);
         const dir = SphereMath.directionFor(refFrame, slot.yaw, slot.pitch || 0);
         const p = SphereMath.project(q, dir, view);
-        const isTarget = target && slot.id === target.id;
 
-        if (!p.visible) {
-          if (isTarget) drawEdgeArrow(ctx, view, q, dir, slot);
-          continue;
+        if (!taken && p.angle < nearestAngle) {
+          nearestAngle = p.angle;
+          nearest = slot;
         }
-        drawDot(ctx, p, slot, taken, isTarget);
-        if (isTarget && p.angle <= RETICLE_DEG) onTarget = slot;
+        if (!p.visible || p.angle > VISIBLE_DEG) continue;
+        drawDot(ctx, p, slot, taken, false);
+      }
+
+      // Whatever unshot dot is closest to the centre becomes the live target,
+      // so the user points wherever they like rather than being marched
+      // through a fixed list.
+      liveTarget = nearest;
+      if (nearest) {
+        const dir = SphereMath.directionFor(refFrame, nearest.yaw, nearest.pitch || 0);
+        const p = SphereMath.project(q, dir, view);
+        if (p.visible) drawDot(ctx, p, nearest, false, true);
+        else drawEdgeArrow(ctx, view, q, dir, nearest);
+        if (p.angle <= RETICLE_DEG) onTarget = nearest;
       }
 
       // Auto-shoot: the dot must sit inside the reticle for a moment, so we
@@ -301,9 +319,13 @@ const ScreenCapture = (() => {
       }
       setFrontBtn.hidden = !live;
 
-      const t = nextSlot();
-      targetLabel.textContent = t ? t.label : "All directions captured";
-      targetHint.textContent = t ? (t.hint || "") : "Tap Build my 360 when you are ready.";
+      const t = liveTarget || nextSlot();
+      const left = state.slots.length - state.shots.size;
+      targetLabel.textContent = t ? t.label : "Every dot captured";
+      targetHint.textContent = t
+        ? (t.hint || "")
+        : "Tap Build my 360 when you are ready.";
+      if (t && left > 0) targetHint.textContent += "  (" + left + " dots left)";
       counter.textContent = `${state.shots.size} of ${state.slots.length}`;
     }
 
@@ -391,7 +413,7 @@ const ScreenCapture = (() => {
     }
 
     shutter.addEventListener("click", () => {
-      const t = nextSlot();
+      const t = liveTarget || nextSlot();
       if (!t) return;
       // The first manual shot also establishes Front if it is not set yet.
       if (!refFrame && tracker.quaternion) refFrame = SphereMath.referenceFrame(tracker.quaternion);

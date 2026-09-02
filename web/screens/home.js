@@ -1,6 +1,6 @@
 const ScreenHome = (() => {
   async function mount(app) {
-    let mode = "pano";
+    let mode = "sphere";
     app.innerHTML = `
       <div class="screen">
         <div class="topbar"><h1>Orbit — 360 Capture</h1></div>
@@ -13,9 +13,13 @@ const ScreenHome = (() => {
             <div class="field">
               <label>Mode</label>
               <div class="mode-row">
-                <button class="mode-btn selected" data-mode="pano">
-                  <div class="title">📷 Photosphere</div>
-                  <div class="desc">Stand in one place and pivot. Good for rooms.</div>
+                <button class="mode-btn selected" data-mode="sphere">
+                  <div class="title">🌐 Full 360</div>
+                  <div class="desc">Dots all around you. Shoot in any direction you like.</div>
+                </button>
+                <button class="mode-btn" data-mode="pano">
+                  <div class="title">📷 Quick 360</div>
+                  <div class="desc">Just four directions: front, right, behind, left.</div>
                 </button>
                 <button class="mode-btn" data-mode="spin">
                   <div class="title">🔄 Object spin</div>
