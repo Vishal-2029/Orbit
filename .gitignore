@@ -1,0 +1,18 @@
+# Python virtualenv for the CV worker
+cv-worker/.venv/
+__pycache__/
+*.pyc
+
+# Compiled Go binaries
+backend/bin/
+
+# Runtime logs and local state
+.logs/
+data/
+
+# Generated test fixtures
+scripts/testdata/
+
+# Real capture photos used for local testing. These are personal photos and
+# must never be published to a shared repository.
+scripts/realtest/
