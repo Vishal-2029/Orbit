@@ -366,3 +366,177 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 @media (pointer: coarse) {
   .side-btn { min-width: 44px; min-height: 44px; }
 }
+
+/* ============================================================
+   Responsive layout
+   The mode picker was a fixed flex row: three cards side by side
+   squeezed into ~110px each on a phone, with the text unreadable.
+   It now stacks, and everything else scales with the viewport.
+   ============================================================ */
+
+.mode-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+.mode-btn {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 76px;
+  text-align: left;
+}
+
+@media (max-width: 640px) {
+  .container { padding: 14px; }
+  .card { padding: 14px; border-radius: 12px; }
+  .topbar h1 { font-size: 1.15rem; }
+
+  /* One card per row, laid out horizontally so each stays short. */
+  .mode-row { grid-template-columns: 1fr; }
+  .mode-btn { min-height: 0; padding: 12px 14px; }
+  .mode-btn .desc { font-size: .8rem; }
+
+  .capture-row { gap: 8px; }
+  .capture-row .thumb { width: 52px; height: 52px; }
+  .capture-row .t { font-size: .95rem; }
+  .capture-row .s { font-size: .75rem; }
+
+  /* Stack the inline delete confirmation instead of letting the buttons
+     shove the title off the row. */
+  .capture-row.confirming { flex-wrap: wrap; }
+  .capture-row.confirming .meta { flex: 1 1 100%; margin-bottom: 8px; }
+  .row-cancel, .row-confirm { flex: 1 1 auto; margin-left: 0; }
+  .row-confirm { margin-left: 8px; }
+}
+
+@media (max-width: 380px) {
+  .container { padding: 10px; }
+  .mode-btn .desc { display: none; }   /* titles alone are clear enough here */
+}
+
+/* Never let a wide element force the whole page to scroll sideways. */
+html, body { max-width: 100%; overflow-x: hidden; }
+img, canvas, video { max-width: 100%; }
+
+/* ============================================================
+   Capture screen
+   ============================================================ */
+
+.capture-screen {
+  position: fixed; inset: 0;
+  background: #000;
+  overflow: hidden;
+}
+#camVideo {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;            /* fill the phone screen, never letterbox */
+}
+#ghostImg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  opacity: .22;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.cam-overlay {
+  position: absolute; inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  /* Keep controls clear of the notch and the home indicator. */
+  padding: max(10px, env(safe-area-inset-top)) 12px
+           max(14px, env(safe-area-inset-bottom));
+  pointer-events: none;
+}
+.cam-overlay > * { pointer-events: auto; }
+
+.cam-top {
+  display: flex; align-items: center; gap: 8px;
+  background: linear-gradient(rgba(0,0,0,.55), transparent);
+  margin: calc(-1 * max(10px, env(safe-area-inset-top))) -12px 0;
+  padding: max(10px, env(safe-area-inset-top)) 12px 22px;
+}
+.cam-top .back {
+  background: rgba(0,0,0,.45); color: #fff; border: 0;
+  width: 40px; height: 40px; border-radius: 50%;
+  font-size: 20px; cursor: pointer;
+}
+.counter {
+  background: rgba(0,0,0,.5); border-radius: 999px;
+  padding: 5px 12px; font-size: 12px; font-weight: 700;
+  white-space: nowrap;
+}
+
+/* The instruction panel sits low so it never covers the reticle. */
+.target-panel {
+  margin-top: auto;
+  text-align: center;
+  padding: 10px 14px;
+  background: rgba(0,0,0,.5);
+  backdrop-filter: blur(6px);
+  border-radius: 14px;
+  align-self: center;
+  max-width: 92%;
+}
+.target-label { font-size: 1.15rem; font-weight: 700; }
+.target-hint  { font-size: .85rem; color: #c8cfd8; margin-top: 3px; line-height: 1.35; }
+
+.thumb-strip {
+  display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden;
+  padding: 8px 2px; margin: 6px 0;
+  scrollbar-width: none;
+}
+.thumb-strip::-webkit-scrollbar { display: none; }
+.thumb-strip img {
+  width: 46px; height: 46px; object-fit: cover;
+  border-radius: 7px; border: 2px solid rgba(255,255,255,.55);
+  flex: 0 0 auto;
+}
+
+.cam-bottom {
+  display: flex; align-items: center; justify-content: center;
+  gap: 26px; padding: 6px 0 2px;
+}
+.shutter {
+  width: 74px; height: 74px; border-radius: 50%;
+  background: rgba(255,255,255,.95);
+  border: 5px solid rgba(255,255,255,.55);
+  cursor: pointer;
+  transition: transform .1s, box-shadow .18s, border-color .18s;
+}
+.shutter:active { transform: scale(.93); }
+.shutter:disabled { opacity: .5; }
+.side-btn {
+  width: 46px; height: 46px; border-radius: 50%;
+  background: rgba(0,0,0,.45); color: #fff; border: 0;
+  font-size: 19px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.side-btn:disabled { opacity: .35; }
+
+.finish-btn {
+  width: 100%; margin-top: 8px;
+  padding: 14px; font-size: 1rem; font-weight: 700;
+  border-radius: 12px;
+}
+.finish-btn:disabled { opacity: .45; }
+
+.cam-err {
+  background: rgba(0,0,0,.6); border-radius: 10px;
+  padding: 9px 12px; font-size: .85rem; line-height: 1.4;
+  margin: 0 auto; max-width: 92%; text-align: center;
+}
+
+/* Landscape: the panel and strip would eat the whole screen. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .target-hint { display: none; }
+  .target-panel { padding: 6px 12px; }
+  .thumb-strip img { width: 34px; height: 34px; }
+  .shutter { width: 58px; height: 58px; border-width: 4px; }
+  .cam-bottom { gap: 18px; }
+  .finish-btn { padding: 10px; }
+}
