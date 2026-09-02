@@ -10,6 +10,9 @@ const (
 	ModePano = "pano" // stand in one place, shoot outward -> photosphere
 	ModeSpin = "spin" // orbit an object -> turntable spin
 	ModeAuto = "auto" // any photos, any order -> let the stitcher work it out
+	// ModeSphere covers the whole sphere with dots rather than a short fixed
+	// list, so the user can shoot in any direction they like.
+	ModeSphere = "sphere"
 )
 
 // Capture statuses.
@@ -51,6 +54,9 @@ func DefaultSettings(mode string) Settings {
 		// There is no shot list to count; whatever the user supplies is it.
 		s.RingCount = 0
 		s.IncludeUpDown = false
+	case ModeSphere:
+		s.RingCount = 30 // degrees between dots
+		s.IncludeUpDown = true
 	}
 	return s
 }

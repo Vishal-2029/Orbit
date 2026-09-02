@@ -83,6 +83,80 @@ var extraRing = []Slot{
 	{ID: "front_left", Label: "Between left and front", Icon: "◤", Yaw: 315},
 }
 
+// FullSpherePlan covers the whole sphere with dots, the way Street View's
+// capture does, instead of offering a handful of fixed directions.
+//
+// Three rings plus the two poles. The rings are spaced so a phone's ~65 degree
+// view overlaps its neighbours by roughly a third in both directions, which is
+// what a stitcher needs. Only the four cardinals on the horizon are required;
+// everything else is there to be filled in if the user wants a fuller sphere.
+func FullSpherePlan(step float64) Plan {
+	if step < 15 {
+		step = 15
+	}
+	if step > 90 {
+		step = 90
+	}
+	rings := []struct {
+		pitch float64
+		label string
+	}{
+		{0, "Around you"},
+		{40, "Upper"},
+		{-40, "Lower"},
+	}
+
+	slots := make([]Slot, 0, 40)
+	add := func(sl Slot, group string, required bool) {
+		sl.Index = len(slots)
+		sl.Group = group
+		sl.Required = required
+		slots = append(slots, sl)
+	}
+
+	// The horizon ring first, cardinals leading, so a user who stops early
+	// still has an even ring rather than a lopsided one.
+	cardinals := map[int]struct{ id, label, icon string }{
+		0: {"front", "Front", "▲"}, 90: {"right", "Right side", "▶"},
+		180: {"back", "Behind you", "▼"}, 270: {"left", "Left side", "◀"},
+	}
+	for _, c := range coreRing {
+		add(c, GroupCore, true)
+	}
+
+	for _, ring := range rings {
+		for yaw := 0.0; yaw < 360; yaw += step {
+			if ring.pitch == 0 {
+				if _, isCardinal := cardinals[int(yaw)]; isCardinal {
+					continue // already added above
+				}
+			}
+			id := fmt.Sprintf("r%+.0f_%03.0f", ring.pitch, yaw)
+			add(Slot{
+				ID: id, Icon: "•", Yaw: yaw, Pitch: ring.pitch,
+				Label: fmt.Sprintf("%s · %.0f°", ring.label, yaw),
+				Hint:  "Line the dot up with the ring and hold steady.",
+			}, GroupExtra, false)
+		}
+	}
+
+	for _, s := range upDown {
+		add(s, GroupUpDown, false)
+	}
+
+	return Plan{
+		Mode: ModePano, Slots: slots,
+		MinRequired: len(coreRing), YawStep: step,
+		AlignTolerance: 10, DuplicateTolerance: step * 0.6,
+		Tips: []string{
+			"Stand still and turn on the spot. Do not walk in a circle.",
+			"Fill in as many dots as you can - more dots, fewer gaps.",
+			"Hold the phone upright and keep the horizon on the centre line.",
+			"The four bright dots are the minimum; the rest add detail.",
+		},
+	}
+}
+
 // PanoPlan builds the shot list for a stand-in-one-place 360.
 //
 // The four cardinal shots are required; up, down and the in-between angles are
@@ -173,6 +247,8 @@ func PlanFor(mode string, count int, includeUpDown bool) Plan {
 		return SpinPlan(count)
 	case ModeAuto:
 		return AutoPlan()
+	case ModeSphere:
+		return FullSpherePlan(float64(count))
 	}
 	// For pano, count is the total the user asked for; extras are offered
 	// whenever they want more than the cardinals plus up/down.

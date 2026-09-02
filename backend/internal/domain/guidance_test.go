@@ -186,3 +186,79 @@ func TestProgressReachesHundredOnlyWhenDone(t *testing.T) {
 		}
 	}
 }
+
+// The full-sphere plan is the "dots everywhere" capture mode.
+func TestFullSpherePlanCoversTheWholeSphere(t *testing.T) {
+	p := FullSpherePlan(30)
+
+	if p.MinRequired != 4 {
+		t.Errorf("MinRequired = %d, want 4 - only the cardinals are compulsory", p.MinRequired)
+	}
+	// 4 cardinals + 8 remaining horizon + 12 upper + 12 lower + up + down
+	if len(p.Slots) != 38 {
+		t.Fatalf("slot count = %d, want 38", len(p.Slots))
+	}
+
+	// The four cardinals must lead, so stopping early still gives an even ring.
+	for i, want := range []string{"front", "right", "back", "left"} {
+		if p.Slots[i].ID != want {
+			t.Errorf("slot %d is %q, want %q", i, p.Slots[i].ID, want)
+		}
+		if !p.Slots[i].Required {
+			t.Errorf("cardinal %q must be required", want)
+		}
+	}
+	for _, s := range p.Slots[4:] {
+		if s.Required {
+			t.Errorf("slot %q beyond the cardinals must be optional", s.ID)
+		}
+	}
+
+	// Every direction must be reachable: three pitch rings plus both poles.
+	pitches := map[float64]int{}
+	ids := map[string]bool{}
+	for _, s := range p.Slots {
+		pitches[s.Pitch]++
+		if ids[s.ID] {
+			t.Errorf("duplicate slot id %q", s.ID)
+		}
+		ids[s.ID] = true
+		if s.Yaw < 0 || s.Yaw >= 360 {
+			t.Errorf("slot %q has yaw %v outside [0,360)", s.ID, s.Yaw)
+		}
+		if s.Label == "" || s.Icon == "" {
+			t.Errorf("slot %q has no user-facing text", s.ID)
+		}
+	}
+	for _, want := range []float64{0, 40, -40, 90, -90} {
+		if pitches[want] == 0 {
+			t.Errorf("no slots at pitch %v", want)
+		}
+	}
+
+	// Dots must be far enough apart that shooting one cannot be mistaken for
+	// its neighbour, or the duplicate check would reject valid photos.
+	if p.DuplicateTolerance >= p.YawStep {
+		t.Errorf("DuplicateTolerance %v must be under the %v spacing",
+			p.DuplicateTolerance, p.YawStep)
+	}
+}
+
+func TestFullSpherePlanClampsSpacing(t *testing.T) {
+	if got := FullSpherePlan(1).YawStep; got != 15 {
+		t.Errorf("tiny spacing = %v, want clamped to 15", got)
+	}
+	if got := FullSpherePlan(400).YawStep; got != 90 {
+		t.Errorf("huge spacing = %v, want clamped to 90", got)
+	}
+}
+
+func TestPlanForSphereMode(t *testing.T) {
+	p := PlanFor(ModeSphere, 30, true)
+	if p.Mode != ModePano {
+		t.Errorf("sphere plan mode = %q, want pano (it is still a photosphere)", p.Mode)
+	}
+	if len(p.Slots) < 20 {
+		t.Errorf("sphere plan has only %d slots", len(p.Slots))
+	}
+}
