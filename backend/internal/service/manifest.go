@@ -75,9 +75,12 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		Mode: c.Mode, Direction: c.Settings.Direction, FrameCount: len(done),
 	}
 
-	// Both pano (guided) and auto (free upload) produce a sphere when the
-	// stitch works; only spin is always a frame sequence by design.
-	wantsSphere := c.Mode == domain.ModePano || c.Mode == domain.ModeAuto
+	// Everything except spin produces a sphere when the stitch works; spin is
+	// a frame sequence by design.
+	//
+	// Listing the modes that DO want a sphere meant adding a new capture mode
+	// silently demoted it to the flat frame viewer, coverage and all.
+	wantsSphere := c.Mode != domain.ModeSpin
 
 	// A stitch that only swallowed a fraction of the photos is not a 360.
 	enoughCoverage := true
