@@ -143,7 +143,8 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 /* --- delete control on a capture row --- */
 .capture-row { position: relative; }
 
-.row-delete {
+.row-delete,
+.row-rebuild {
   flex: 0 0 auto;
   width: 30px; height: 30px;
   margin-left: 6px;
@@ -162,10 +163,21 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
   transform: scale(1.08);
   outline: none;
 }
+/* Rebuilding is safe and repeatable, so it reads as an ordinary action rather
+   than borrowing the delete button's warning colour. */
+.row-rebuild:hover,
+.row-rebuild:focus-visible {
+  background: rgba(96,141,255,.20);
+  color: #9ab6ff;
+  transform: scale(1.08);
+  outline: none;
+}
+.row-rebuild:disabled { opacity: .45; cursor: default; transform: none; }
 
 /* Touch targets need to be bigger than the visual circle on a phone. */
 @media (pointer: coarse) {
-  .row-delete { width: 38px; height: 38px; font-size: 22px; }
+  .row-delete,
+  .row-rebuild { width: 38px; height: 38px; font-size: 22px; }
 }
 
 .capture-row.confirming {

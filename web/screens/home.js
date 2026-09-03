@@ -81,15 +81,18 @@ const ScreenHome = (() => {
             Router.navigate(`#/capture/${c.id}`);
           }
         });
-        const del = row.querySelector(".row-delete");
-        if (del) del.addEventListener("click", (ev) => {
-          ev.stopPropagation();   // don't open the capture we're deleting
-          confirmDelete(app, row, c);
-        });
+        bindRowButtons(app, row, c);
       });
     } catch (e) {
       list.innerHTML = `<p class="muted">Could not load captures: ${escapeHtml(e.message)}</p>`;
     }
+  }
+
+  // "partial" means it fell back rather than stitched, and "failed" means it
+  // did not finish at all. Both usually come down to the run, not the photos,
+  // so both are worth another attempt without walking into the capture first.
+  function canRebuild(c) {
+    return c.status === "partial" || c.status === "failed";
   }
 
   function rowHtml(c) {
@@ -106,8 +109,30 @@ const ScreenHome = (() => {
           <div class="s">${c.mode === "spin" ? "Object spin" : "Photosphere"} · ${new Date(c.created_at).toLocaleString()}</div>
         </div>
         <span class="badge ${badgeClass}">${c.status}</span>
+        ${canRebuild(c) ? `<button class="row-rebuild" title="Build this 360 again from the same photos" aria-label="Build ${escapeHtml(c.title)} again">\u21bb</button>` : ""}
         <button class="row-delete" title="Delete this capture" aria-label="Delete ${escapeHtml(c.title)}">\u00d7</button>
       </div>`;
+  }
+
+  function bindRowButtons(app, row, c) {
+    const del = row.querySelector(".row-delete");
+    if (del) del.addEventListener("click", (ev) => {
+      ev.stopPropagation();   // don't open the capture we're deleting
+      confirmDelete(app, row, c);
+    });
+    const rebuild = row.querySelector(".row-rebuild");
+    if (rebuild) rebuild.addEventListener("click", async (ev) => {
+      ev.stopPropagation();   // don't open the capture we're rebuilding
+      rebuild.disabled = true;
+      try {
+        await OrbitAPI.process(c.id);
+        // Watch it from the processing screen, the same as a first build.
+        Router.navigate(`#/processing/${c.id}`);
+      } catch (e) {
+        rebuild.disabled = false;
+        row.querySelector(".s").textContent = "Could not start: " + e.message;
+      }
+    });
   }
 
   // Deleting is permanent and removes the stored photos too, so the row turns
@@ -128,11 +153,9 @@ const ScreenHome = (() => {
       ev.stopPropagation();
       row.classList.remove("confirming");
       row.innerHTML = original;
-      const del = row.querySelector(".row-delete");
-      if (del) del.addEventListener("click", (e2) => {
-        e2.stopPropagation();
-        confirmDelete(app, row, c);
-      });
+      // The row's markup was replaced, so every button on it needs binding
+      // again - not just the delete one that put it into this state.
+      bindRowButtons(app, row, c);
     });
 
     row.querySelector(".row-confirm").addEventListener("click", async (ev) => {
