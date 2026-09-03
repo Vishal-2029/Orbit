@@ -91,9 +91,6 @@ a { color: var(--accent); }
 .cam-top .back { background: rgba(0,0,0,.4); }
 .counter { margin-left: auto; background: rgba(0,0,0,.5); padding: .3em .8em; border-radius: 999px; font-variant-numeric: tabular-nums; }
 
-
-
-
 .finish-row { display: flex; justify-content: center; }
 .finish-row button { width: 100%; max-width: 420px; }
 
@@ -423,8 +420,11 @@ img, canvas, video { max-width: 100%; }
 }
 .cam-top .back {
   background: rgba(0,0,0,.45); color: #fff; border: 0;
-  width: 40px; height: 40px; border-radius: 50%;
-  font-size: 20px; cursor: pointer;
+  width: 44px; height: 44px; border-radius: 50%;
+  font-size: 20px; line-height: 1; cursor: pointer;
+  /* Without this it inherits the global button padding, which inflates the
+     circle and leaves the arrow sitting low and right of centre. */
+  display: flex; align-items: center; justify-content: center; padding: 0;
 }
 .counter {
   background: rgba(0,0,0,.5); border-radius: 999px;
@@ -517,28 +517,6 @@ img, canvas, video { max-width: 100%; }
    something the user could act on.
    ============================================================ */
 
-.say-panel {
-  margin: 18px auto 0;
-  text-align: center;
-  max-width: 88%;
-  padding: 12px 18px;
-  border-radius: 16px;
-  background: rgba(0, 0, 0, .5);
-  backdrop-filter: blur(8px);
-}
-.say-big {
-  font-size: 1.35rem;
-  font-weight: 700;
-  line-height: 1.2;
-  letter-spacing: -.01em;
-}
-.say-small {
-  margin-top: 5px;
-  font-size: .9rem;
-  color: #cfd6df;
-  line-height: 1.35;
-}
-
 /* Everything below the viewfinder sits together at the bottom. */
 .cam-foot { margin-top: auto; }
 
@@ -546,17 +524,8 @@ img, canvas, video { max-width: 100%; }
 .status-pill.hidden { opacity: 0; pointer-events: none; }
 .status-pill { transition: opacity .2s; }
 
-@media (max-width: 380px) {
-  .say-big   { font-size: 1.15rem; }
-  .say-small { font-size: .82rem; }
-  .say-panel { padding: 10px 14px; }
-}
-@media (orientation: landscape) and (max-height: 500px) {
-  .say-panel { margin-top: 8px; padding: 7px 14px; }
-  .say-big   { font-size: 1rem; }
-  .say-small { display: none; }
-}
-
+@media (max-width: 380px) {    }
+@media (orientation: landscape) and (max-height: 500px) {  }
 
 /* Author styles that set `display` beat the browser's own rule for the hidden
    attribute, so .side-btn{display:flex} was keeping buttons on screen after

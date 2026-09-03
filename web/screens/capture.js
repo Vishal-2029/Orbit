@@ -50,8 +50,6 @@ const ScreenCapture = (() => {
     const dotCanvas = app.querySelector("#dotCanvas");
     const ghost = app.querySelector("#ghostImg");
     const shutter = app.querySelector("#shutterBtn");
-    const targetLabel = app.querySelector("#targetLabel");
-    const targetHint = app.querySelector("#targetHint");
     const counter = app.querySelector("#counter");
     const statusPill = app.querySelector("#statusPill");
     const thumbStrip = app.querySelector("#thumbStrip");
@@ -233,7 +231,7 @@ const ScreenCapture = (() => {
     // They sit top-left, below the instruction panel and clear of the shutter
     // row. The instruction panel is centred, so the left edge is free.
     const GAUGE_R = 30;
-    const GAUGE_TOP = 178;
+    const GAUGE_TOP = 108;
 
     function gaugeCentres(view) {
       const x = GAUGE_R + 18;
@@ -324,8 +322,10 @@ const ScreenCapture = (() => {
       PITCH_BANDS.forEach((band) => {
         const slots = state.slots.filter((sl) => band.test(sl.pitch || 0));
         const shot = slots.filter((sl) => state.shots.has(sl.id)).length;
-        // level is drawn as two arcs; count it once.
-        if (band.id !== "level2") { done += shot; total += slots.length; }
+        // Count only what this gauge is about. The horizon belongs to the L/R
+        // gauge, and including it here read as "2 of 32" while every shot above
+        // and below was still missing.
+        if (band.id === "up" || band.id === "down") { done += shot; total += slots.length; }
 
         const complete = slots.length > 0 && shot >= slots.length;
         c.strokeStyle = slots.length === 0
@@ -481,22 +481,13 @@ const ScreenCapture = (() => {
       const need = plan.min_required || 1;
       const ringLeft = ringSlots.filter((s) => !state.shots.has(s.id)).length;
 
-      if (!t) {
-        targetLabel.textContent = "All done";
-        targetHint.textContent = "Tap Build my 360 below.";
-      } else if (ringLeft > 0) {
-        // While the circle is unfinished, that is the only thing worth saying.
-        targetLabel.textContent = "Keep turning the same way";
-        targetHint.textContent = ringLeft === 1
-          ? "One more photo closes the circle."
-          : `${ringLeft} more photos to close the circle.`;
-      } else {
-        targetLabel.textContent = "Circle complete";
-        targetHint.textContent = state.shots.size < state.slots.length
-          ? "Now point up at the ceiling and down at the floor."
-          : "Tap Build my 360 below.";
-      }
+      // What to do next is already on screen three times over: the finish
+      // button counts the remaining shots, each dot carries its own label, and
+      // the two gauges show what is missing in each axis. A full-width banner
+      // saying it a fourth time only covered the gauges up.
+      void t;
       void need;
+      void ringLeft;
     }
 
     function renderThumbs() {
@@ -663,13 +654,6 @@ const ScreenCapture = (() => {
             <button class="back" onclick="location.hash='#/'" title="Back to home">←</button>
             <div class="cam-title">${escapeHtml(capture.title)}</div>
             <button id="gridBtn" class="side-btn grid-btn" title="Framing grid" aria-pressed="false">⊞</button>
-          </div>
-
-          <!-- One short line. Big enough to read at arm's length, high enough
-               that it never sits over the reticle. -->
-          <div class="say-panel">
-            <div id="targetLabel" class="say-big"></div>
-            <div id="targetHint" class="say-small"></div>
           </div>
 
           <div id="statusPill" class="status-pill"></div>
