@@ -10,6 +10,8 @@ import logging
 
 import cv2
 
+from config import settings
+
 log = logging.getLogger("orbit-worker")
 
 STATUS_MESSAGES = {
@@ -50,6 +52,16 @@ def stitch_panorama(images):
     for name, mode in modes:
         try:
             stitcher = cv2.Stitcher_create(mode)
+            # OpenCV composites at the input resolution by default, allocating a
+            # full-size warped image and mask for every photo. That single step
+            # is the largest allocation in the whole worker - measured at +171
+            # MiB over the loaded frames for a 16-photo ring, against +95 MiB
+            # when capped to 1.2 megapixels. On a small instance it is the
+            # difference between finishing and being OOM-killed, so it is
+            # capped when a budget is configured. The cost is a smaller output
+            # panorama, which is why the default leaves it at full resolution.
+            if settings.stitch_compositing_mp > 0:
+                stitcher.setCompositingResol(settings.stitch_compositing_mp)
             status, pano = stitcher.stitch(images)
         except cv2.error as e:
             log.warning("[orbit-worker] stitcher mode=%s raised cv2.error: %s", name, e)

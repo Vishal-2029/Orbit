@@ -55,6 +55,12 @@ class Settings:
     thumb_width = _envint("THUMB_WIDTH", 500)
     jpeg_quality = _envint("JPEG_QUALITY", 85)
 
+    # Megapixels the stitcher composites at. 0 keeps OpenCV's default, which is
+    # the input resolution and by far the worker's biggest allocation. Set this
+    # on a memory-limited host: 1.2 roughly halves the stitch's peak, at the
+    # cost of a smaller finished panorama.
+    stitch_compositing_mp = float(_env("STITCH_COMPOSITING_MP", "0"))
+
     # Retry / backoff
     max_attempts = _envint("MAX_ATTEMPTS", 3)
     backoff_base_seconds = _envint("BACKOFF_BASE_SECONDS", 2)

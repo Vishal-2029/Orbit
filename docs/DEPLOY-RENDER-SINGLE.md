@@ -32,8 +32,36 @@ That leaves roughly 130 MiB of headroom, so the risks worth knowing are:
 - **Many more frames.** 12 photos was the test; a much larger ring holds more
 	decoded frames in memory at once.
 
-If you do hit an OOM, Render logs exit code 137. Lower `TARGET_WIDTH` (to 1200,
-say) before considering a paid instance — memory scales with pixel count.
+### If you hit an OOM
+
+Render logs exit code 137 and restarts the instance. **Lowering `TARGET_WIDTH`
+is not the fix** — measured on a 16-photo ring, dropping it from 1600 to 1024
+saved only 39 MiB, because the stitch's cost is driven by how many photos there
+are, not how wide each one is.
+
+The effective lever is the stitcher's compositing resolution. OpenCV composites
+at the input resolution by default, allocating a full-size warped image and mask
+per photo, and that single step is the worker's largest allocation:
+
+| 16 frames at 1600px | Peak |
+|---|---|
+| Frames loaded, before stitching | 206 MiB |
+| Stitch, OpenCV default | 377 MiB |
+| `STITCH_COMPOSITING_MP=1.2` | 301 MiB |
+| `STITCH_COMPOSITING_MP=0.8` | 276 MiB |
+
+End to end in the combined container under a hard 512 MiB cap, the same capture
+peaks at 434 MiB by default and 357 MiB with `STITCH_COMPOSITING_MP=1.2` —
+78 MiB of headroom against 155 MiB. So set:
+
+```env
+STITCH_COMPOSITING_MP=1.2
+```
+
+The trade is a smaller finished panorama (roughly 4214x952 rather than
+5329x1204). If you want full resolution and no memory ceiling, move the worker
+to a Hugging Face Space as described in [DEPLOY-FREE.md](DEPLOY-FREE.md); a free
+Space has 16 GB and this setting can stay at its default there.
 
 ## 1. Point the service at the combined Dockerfile
 
