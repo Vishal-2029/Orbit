@@ -56,6 +56,7 @@ const ScreenCapture = (() => {
     const statusPill = app.querySelector("#statusPill");
     const thumbStrip = app.querySelector("#thumbStrip");
     const finishBtn = app.querySelector("#finishBtn");
+    const coverWarn = app.querySelector("#coverWarn");
     const retakeBtn = app.querySelector("#retakeBtn");
     const setFrontBtn = app.querySelector("#setFrontBtn");
     const gridBtn = app.querySelector("#gridBtn");
@@ -161,7 +162,8 @@ const ScreenCapture = (() => {
       }
 
       drawReticle(ctx, view, live);
-      drawCoverageRing(ctx, view);
+      drawYawGauge(ctx, view);
+      drawPitchGauge(ctx, view);
 
       if (!live || !q) { renderStatus(); return; }
       if (!refFrame) { renderStatus(); return; }
@@ -223,60 +225,126 @@ const ScreenCapture = (() => {
 
     // --- drawing ---
 
-    // A ring showing the whole circle you have to walk round, with the parts
-    // you have already photographed filled in.
+    // Two gauges, top-left: one for turning left and right, one for looking up
+    // and down. Coverage fails in both axes independently - a user can walk the
+    // full circle and still never point at the ceiling - and a single ring can
+    // only ever show one of them.
     //
-    // This exists because of the single most common way a capture goes wrong:
-    // the user turns most of the way, stops, and has no idea a third of the
-    // room was never shot. A list of dots cannot show that. A circle with a
-    // bite missing out of it can be read in half a second.
-    function drawCoverageRing(c, view) {
-      // Bottom-left, clear of the instruction panel above and the shutter row
-      // below. Top-right put it under the message panel, which hid the very
-      // thing it exists to show.
-      const R = 34;
-      const cx = R + 20;
-      const cy = view.height - R - 176;
+    // They sit top-left, below the instruction panel and clear of the shutter
+    // row. The instruction panel is centred, so the left edge is free.
+    const GAUGE_R = 30;
+    const GAUGE_TOP = 178;
+
+    function gaugeCentres(view) {
+      const x = GAUGE_R + 18;
+      return {
+        yaw:   { cx: x, cy: GAUGE_TOP },
+        pitch: { cx: x, cy: GAUGE_TOP + GAUGE_R * 2 + 22 },
+      };
+    }
+
+    // Where the phone points right now, or null before the reference frame is
+    // established.
+    function currentHeading() {
+      if (!refFrame || !tracker.quaternion) return null;
+      return SphereMath.headingOf(refFrame, tracker.quaternion);
+    }
+
+    function drawNeedle(c, cx, cy, angleRad, r) {
+      c.strokeStyle = "#fff";
+      c.lineWidth = 2;
+      c.beginPath();
+      c.moveTo(cx + Math.cos(angleRad) * (r - 12), cy + Math.sin(angleRad) * (r - 12));
+      c.lineTo(cx + Math.cos(angleRad) * (r + 7), cy + Math.sin(angleRad) * (r + 7));
+      c.stroke();
+    }
+
+    function gaugeLabel(c, cx, cy, done, total, caption) {
+      c.fillStyle = "#fff";
+      c.textAlign = "center";
+      c.font = "700 15px system-ui, sans-serif";
+      c.fillText(`${done}`, cx, cy - 1);
+      c.font = "500 9px system-ui, sans-serif";
+      c.fillStyle = "rgba(255,255,255,.7)";
+      c.fillText(`of ${total}`, cx, cy + 11);
+      c.font = "600 9px system-ui, sans-serif";
+      c.fillStyle = "rgba(255,255,255,.85)";
+      c.fillText(caption, cx, cy + GAUGE_R + 13);
+    }
+
+    // Turning: one segment per dot on the horizon ring, filled once shot. This
+    // exists because of the commonest way a capture goes wrong - the user turns
+    // most of the way, stops, and never notices a third of the room is missing.
+    // A circle with a bite out of it reads in half a second; a list does not.
+    function drawYawGauge(c, view) {
+      const { cx, cy } = gaugeCentres(view).yaw;
       const arc = (Math.PI * 2) / Math.max(1, ringSlots.length);
 
       c.save();
-      c.lineWidth = 9;
+      c.lineWidth = 8;
       c.lineCap = "butt";
-
-      ringSlots.forEach((slot, i) => {
+      ringSlots.forEach((slot) => {
         // -90deg so "front" sits at the top, the way a compass reads.
         const a0 = (slot.yaw / 180) * Math.PI - Math.PI / 2 - arc / 2 + 0.03;
-        const a1 = a0 + arc - 0.06;
         c.strokeStyle = state.shots.has(slot.id)
           ? "rgba(61,220,132,.95)"     // photographed
           : "rgba(255,255,255,.22)";   // still missing
         c.beginPath();
-        c.arc(cx, cy, R, a0, a1);
+        c.arc(cx, cy, GAUGE_R, a0, a0 + arc - 0.06);
         c.stroke();
       });
 
-      // Where the phone is pointing right now.
-      if (refFrame && tracker.quaternion) {
-        const h = SphereMath.headingOf(refFrame, tracker.quaternion);
-        const a = (h.yaw / 180) * Math.PI - Math.PI / 2;
-        c.strokeStyle = "#fff";
-        c.lineWidth = 2;
-        c.beginPath();
-        c.moveTo(cx + Math.cos(a) * (R - 13), cy + Math.sin(a) * (R - 13));
-        c.lineTo(cx + Math.cos(a) * (R + 8), cy + Math.sin(a) * (R + 8));
-        c.stroke();
-      }
+      const h = currentHeading();
+      if (h) drawNeedle(c, cx, cy, (h.yaw / 180) * Math.PI - Math.PI / 2, GAUGE_R);
 
-      // Count the ring, not every slot. The ring is what the circle shows, and
-      // "0 of 32" next to twelve segments simply did not add up.
-      const ringDone = ringSlots.filter((sl) => state.shots.has(sl.id)).length;
-      c.fillStyle = "#fff";
-      c.textAlign = "center";
-      c.font = "700 16px system-ui, sans-serif";
-      c.fillText(`${ringDone}`, cx, cy + 1);
-      c.font = "500 10px system-ui, sans-serif";
-      c.fillStyle = "rgba(255,255,255,.7)";
-      c.fillText(`of ${ringSlots.length}`, cx, cy + 15);
+      const done = ringSlots.filter((sl) => state.shots.has(sl.id)).length;
+      gaugeLabel(c, cx, cy, done, ringSlots.length, "L / R");
+      c.restore();
+    }
+
+    // Looking up and down. The circle is split the way the world is: ceiling
+    // across the top, floor across the bottom, the horizon down each side. The
+    // needle rides the same mapping, so pointing the phone up swings it up.
+    const PITCH_BANDS = [
+      { id: "up",    from: -160, to: -20,  test: (p) => p >= 20 },
+      { id: "down",  from: 20,   to: 160,  test: (p) => p <= -20 },
+      { id: "level", from: -20,  to: 20,   test: (p) => Math.abs(p) < 20 },
+      { id: "level2", from: 160, to: 200,  test: (p) => Math.abs(p) < 20 },
+    ];
+
+    function drawPitchGauge(c, view) {
+      const { cx, cy } = gaugeCentres(view).pitch;
+      const rad = (d) => (d / 180) * Math.PI;
+
+      c.save();
+      c.lineWidth = 8;
+      c.lineCap = "butt";
+
+      let done = 0, total = 0;
+      PITCH_BANDS.forEach((band) => {
+        const slots = state.slots.filter((sl) => band.test(sl.pitch || 0));
+        const shot = slots.filter((sl) => state.shots.has(sl.id)).length;
+        // level is drawn as two arcs; count it once.
+        if (band.id !== "level2") { done += shot; total += slots.length; }
+
+        const complete = slots.length > 0 && shot >= slots.length;
+        c.strokeStyle = slots.length === 0
+          ? "rgba(255,255,255,.10)"      // nothing planned in this band
+          : complete
+            ? "rgba(61,220,132,.95)"
+            : shot > 0
+              ? "rgba(255,210,122,.9)"   // started, not finished
+              : "rgba(255,255,255,.22)";
+        c.beginPath();
+        c.arc(cx, cy, GAUGE_R, rad(band.from) + 0.04, rad(band.to) - 0.04);
+        c.stroke();
+      });
+
+      const h = currentHeading();
+      // pitch +90 (straight up) -> top of the dial, -90 (floor) -> bottom.
+      if (h) drawNeedle(c, cx, cy, rad(-h.pitch), GAUGE_R);
+
+      gaugeLabel(c, cx, cy, done, total, "Up / Dn");
       c.restore();
     }
 
@@ -450,6 +518,24 @@ const ScreenCapture = (() => {
         ? `${ringLeft} more to close the circle`
         : "Build my 360 →";
       retakeBtn.disabled = state.shots.size === 0;
+
+      // Closing the ring is not the same as covering the sphere. Anything above
+      // or below that was never shot comes back as a soft blurred wash in the
+      // finished 360, because there is no photograph of it - so say so here,
+      // while it can still be fixed, rather than letting it be a surprise.
+      const off = state.slots.filter((sl) => Math.abs(sl.pitch || 0) >= 20);
+      const offLeft = off.filter((sl) => !state.shots.has(sl.id)).length;
+      if (coverWarn) {
+        if (ringLeft === 0 && offLeft > 0) {
+          const pct = Math.round((1 - offLeft / state.slots.length) * 100);
+          coverWarn.textContent =
+            `${offLeft} dot${offLeft === 1 ? "" : "s"} above or below not shot ` +
+            `— about ${pct}% covered. Those directions will look blurred.`;
+          coverWarn.hidden = false;
+        } else {
+          coverWarn.hidden = true;
+        }
+      }
     }
 
     function updateGhost() {
@@ -596,6 +682,7 @@ const ScreenCapture = (() => {
               <button id="setFrontBtn" class="side-btn" title="Start the circle here" hidden>⌖</button>
             </div>
             <div id="camErr" class="cam-err"></div>
+            <div id="coverWarn" class="cover-warn" hidden></div>
             <button id="finishBtn" class="primary finish-btn" disabled></button>
           </div>
         </div>

@@ -121,6 +121,7 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 			m.Frames = append(m.Frames, s.PublicURL(captureID, "processed", f.Index))
 			m.Previews = append(m.Previews, s.PublicURL(captureID, "thumb", f.Index))
 			m.Yaws = append(m.Yaws, f.Yaw)
+			m.Pitches = append(m.Pitches, f.Pitch)
 		}
 		m.Width, m.Height = done[0].Width, done[0].Height
 		if wantsSphere {

@@ -14,29 +14,16 @@ const ScreenHome = (() => {
               <label>Mode</label>
               <div class="mode-row">
                 <button class="mode-btn selected" data-mode="sphere">
-                  <div class="title">🌐 Full 360</div>
-                  <div class="desc">Dots all around you, plus ceiling and floor. Best result.</div>
-                </button>
-                <button class="mode-btn" data-mode="pano">
-                  <div class="title">📷 Quick 360</div>
-                  <div class="desc">One ring around you. Fewer photos, no ceiling or floor.</div>
+                  <div class="title">🌐 360 view</div>
+                  <div class="desc">Stand still and turn. Dots guide you all the way round, plus ceiling and floor.</div>
                 </button>
                 <button class="mode-btn" data-mode="spin">
                   <div class="title">🔄 Object spin</div>
-                  <div class="desc">Turntable — rotate an object in front of a fixed camera.</div>
-                </button>
-                <button class="mode-btn" data-mode="auto">
-                  <div class="title">🖼 Photos I already have</div>
-                  <div class="desc">Pick any photos, any order. The stitcher works out how they fit.</div>
+                  <div class="desc">Turntable — rotate an object in front of a fixed camera, from three heights.</div>
                 </button>
               </div>
             </div>
             <button id="startBtn" class="primary" style="width:100%">Start capture</button>
-            <input id="filePicker" type="file" accept="image/*" multiple hidden />
-            <div id="uploadBox" hidden>
-              <div id="uploadStatus" class="muted" style="margin-top:10px"></div>
-              <div class="upload-bar"><span id="uploadBar"></span></div>
-            </div>
             <div id="errBox" class="muted" style="margin-top:8px;color:var(--bad)"></div>
           </div>
 
@@ -48,32 +35,17 @@ const ScreenHome = (() => {
     `;
 
     const startBtn = app.querySelector("#startBtn");
-    const filePicker = app.querySelector("#filePicker");
-    const uploadBox = app.querySelector("#uploadBox");
-    const uploadStatus = app.querySelector("#uploadStatus");
-    const uploadBar = app.querySelector("#uploadBar");
-
-    function applyMode() {
-      startBtn.textContent = mode === "auto" ? "Choose photos\u2026" : "Start capture";
-    }
 
     app.querySelectorAll(".mode-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         mode = btn.dataset.mode;
         app.querySelectorAll(".mode-btn").forEach((b) => b.classList.toggle("selected", b === btn));
-        applyMode();
       });
     });
-    applyMode();
 
     startBtn.addEventListener("click", async () => {
       const errBox = app.querySelector("#errBox");
       errBox.textContent = "";
-      // "Photos I already have" opens the picker instead of the camera.
-      if (mode === "auto") {
-        filePicker.click();
-        return;
-      }
       const title = app.querySelector("#titleInput").value.trim() || "Untitled 360";
       startBtn.disabled = true;
       try {
@@ -81,63 +53,6 @@ const ScreenHome = (() => {
         Router.navigate(`#/capture/${capture.id}`);
       } catch (e) {
         errBox.textContent = "Could not start capture: " + e.message;
-        startBtn.disabled = false;
-      }
-    });
-
-    filePicker.addEventListener("change", async () => {
-      const files = Array.from(filePicker.files || []);
-      filePicker.value = "";   // so picking the same files again still fires
-      if (!files.length) return;
-
-      const errBox = app.querySelector("#errBox");
-      errBox.textContent = "";
-      const MIN = 4;
-      if (files.length < MIN) {
-        errBox.textContent = `Pick at least ${MIN} photos \u2014 ${files.length} is not enough to make a 360.`;
-        return;
-      }
-
-      const title = app.querySelector("#titleInput").value.trim() || "Untitled 360";
-      startBtn.disabled = true;
-      uploadBox.hidden = false;
-
-      try {
-        const { capture } = await OrbitAPI.createCapture(title, "auto");
-
-        // Sequential, not parallel: phone photos are several MB each, and
-        // firing 30 uploads at once on mobile data is how half of them fail.
-        let sent = 0;
-        const failed = [];
-        for (let i = 0; i < files.length; i++) {
-          uploadStatus.textContent = `Uploading ${i + 1} of ${files.length}\u2026`;
-          uploadBar.style.width = `${Math.round((i / files.length) * 100)}%`;
-          try {
-            await OrbitAPI.uploadPhoto(capture.id, {
-              blob: files[i], index: i, slotId: `photo_${i}`,
-              yaw: 0, pitch: 0, hasHeading: false, filename: files[i].name,
-            });
-            sent++;
-          } catch (e) {
-            failed.push(files[i].name);
-          }
-        }
-        uploadBar.style.width = "100%";
-
-        if (sent < MIN) {
-          throw new Error(
-            `Only ${sent} of ${files.length} photos uploaded, which is under the ${MIN} needed.`
-          );
-        }
-        uploadStatus.textContent = failed.length
-          ? `${sent} uploaded, ${failed.length} skipped. Building anyway\u2026`
-          : "All uploaded. Building your 360\u2026";
-
-        await OrbitAPI.process(capture.id);
-        Router.navigate(`#/processing/${capture.id}`);
-      } catch (e) {
-        uploadBox.hidden = true;
-        errBox.textContent = "Could not build a 360 from those photos: " + e.message;
         startBtn.disabled = false;
       }
     });

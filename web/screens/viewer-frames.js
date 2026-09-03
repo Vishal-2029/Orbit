@@ -1,8 +1,35 @@
 // Drag-to-spin frame-swap viewer for turntable ("frames" renderer) manifests.
-// Preloads every frame first, then swaps images on horizontal drag with
-// correct modulo wrap-around, flick inertia, and autospin-until-touched.
+// Preloads every frame first, then swaps images on drag with correct
+// modulo wrap-around, flick inertia, and autospin-until-touched.
+//
+// Spin captures are shot from three heights, so the frames form a grid rather
+// than a single ring: dragging sideways turns the object, dragging up and down
+// changes the height you are looking from. With one row it behaves exactly as
+// the old single-axis viewer did.
 const FramesViewer = (() => {
-  function create(host, frameUrls, onLoadProgress) {
+  // Group frames into rows of equal height using the angles the manifest
+  // carries. Falls back to one row when there are no angles, which is what the
+  // stitch-failure fallback produces.
+  function buildGrid(n, yaws, pitches) {
+    if (!pitches || pitches.length !== n || !yaws || yaws.length !== n) {
+      return [Array.from({ length: n }, (_, i) => i)];
+    }
+    const byPitch = new Map();
+    for (let i = 0; i < n; i++) {
+      // Round so tiny sensor differences do not split one row in two.
+      const key = Math.round(pitches[i] / 15) * 15;
+      if (!byPitch.has(key)) byPitch.set(key, []);
+      byPitch.get(key).push(i);
+    }
+    // Highest row first, so dragging up moves toward the top of the object.
+    const rows = [...byPitch.entries()].sort((a, b) => b[0] - a[0]).map(([, idx]) =>
+      idx.sort((a, b) => yaws[a] - yaws[b]));
+    // A row with a single frame is noise, not a viewing height - fold it back
+    // in rather than letting a drag land on a row that cannot turn.
+    return rows.length > 1 && rows.every((r) => r.length > 1) ? rows : [rows.flat()];
+  }
+
+  function create(host, frameUrls, onLoadProgress, angles) {
     const n = frameUrls.length;
     const imgs = new Array(n);
     const wrap = document.createElement("div");
@@ -23,9 +50,16 @@ const FramesViewer = (() => {
       imgs[i] = im;
     }));
 
+    const grid = buildGrid(n, angles && angles.yaws, angles && angles.pitches);
+    let row = Math.floor(grid.length / 2);   // start level with the object
     let index = 0;
     let dragging = false;
     let lastX = 0;
+    let lastY = 0;
+    // How far you drag vertically to change viewing height. Deliberately larger
+    // than the horizontal step: rows are few, and an accidental vertical wobble
+    // during a sideways spin should not jump the camera up and down.
+    const PIXELS_PER_ROW = 70;
     let velocity = 0; // frames per ms, smoothed
     let lastMoveTime = 0;
     let autospin = null;
@@ -40,24 +74,49 @@ const FramesViewer = (() => {
     const MAX_FLICK_SPEED = 0.012;   // frames per ms
 
     function wrapIndex(i) {
-      return ((i % n) + n) % n;
+      const len = grid[row].length;
+      return ((i % len) + len) % len;
     }
 
     function render() {
-      const im = imgs[wrapIndex(index)];
+      const im = imgs[grid[row][wrapIndex(index)]];
       if (im && im.complete && im.naturalWidth) imgEl.src = im.src;
     }
 
-    function onDown(x) {
+    // Rows do not wrap: the top of an object is the top. Clamping stops a drag
+    // from looping from above straight back to below.
+    function setRow(next) {
+      const clamped = Math.max(0, Math.min(grid.length - 1, next));
+      if (clamped === row) return;
+      // Keep pointing at the same side of the object when changing height.
+      const frac = index / grid[row].length;
+      row = clamped;
+      index = wrapIndex(Math.round(frac * grid[row].length));
+      render();
+    }
+
+    function onDown(x, y) {
       dragging = true;
       lastX = x;
+      lastY = y;
       lastMoveTime = performance.now();
       velocity = 0;
       stopAutospin();
     }
-    function onMove(x) {
+    function onMove(x, y) {
       if (!dragging) return;
       const now = performance.now();
+
+      if (grid.length > 1) {
+        const dy = y - lastY;
+        if (Math.abs(dy) >= PIXELS_PER_ROW) {
+          // Drag up -> look from higher up, which is the row above.
+          setRow(row + (dy < 0 ? -1 : 1));
+          lastY = y;
+          return;
+        }
+      }
+
       const dx = x - lastX;
       const framesDelta = -dx / PIXELS_PER_FRAME;
       if (Math.abs(framesDelta) >= 1) {
@@ -119,11 +178,14 @@ const FramesViewer = (() => {
       autospin = null;
     }
 
-    wrap.addEventListener("mousedown", (e) => { e.preventDefault(); onDown(e.clientX); });
-    window.addEventListener("mousemove", (e) => onMove(e.clientX));
+    // Named so destroy() can actually remove them; the old anonymous arrows
+    // created fresh functions and removed nothing.
+    const onMouseMove = (e) => onMove(e.clientX, e.clientY);
+    wrap.addEventListener("mousedown", (e) => { e.preventDefault(); onDown(e.clientX, e.clientY); });
+    window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onUp);
-    wrap.addEventListener("touchstart", (e) => onDown(e.touches[0].clientX), { passive: true });
-    wrap.addEventListener("touchmove", (e) => { onMove(e.touches[0].clientX); }, { passive: true });
+    wrap.addEventListener("touchstart", (e) => onDown(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+    wrap.addEventListener("touchmove", (e) => { onMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
     wrap.addEventListener("touchend", onUp);
 
     Promise.all(loadPromises).then(() => {
@@ -136,7 +198,7 @@ const FramesViewer = (() => {
       destroy() {
         cancelled = true;
         stopAutospin();
-        window.removeEventListener("mousemove", (e) => onMove(e.clientX));
+        window.removeEventListener("mousemove", onMouseMove);
         window.removeEventListener("mouseup", onUp);
         if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
       },

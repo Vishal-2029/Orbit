@@ -48,7 +48,9 @@ func DefaultSettings(mode string) Settings {
 	s := Settings{RingCount: 6, IncludeUpDown: true, Align: true, TargetWidth: 1600, Direction: "cw"}
 	switch mode {
 	case ModeSpin:
-		s.RingCount = 24
+		// Three rows of five. Spin is shot from above, level and below so the
+		// viewer can be dragged in both axes, not just round.
+		s.RingCount = SpinMinFrames
 		s.IncludeUpDown = false
 	case ModeAuto:
 		// There is no shot list to count; whatever the user supplies is it.
@@ -136,6 +138,10 @@ type Manifest struct {
 	Frames     []string  `json:"frames,omitempty"`
 	Previews   []string  `json:"previews,omitempty"`
 	Yaws       []float64 `json:"yaws,omitempty"`
+	// Pitches pairs with Yaws. Spin captures are shot from three heights, so
+	// the viewer needs the vertical angle too in order to lay the frames out as
+	// a grid and let a drag upward change row rather than doing nothing.
+	Pitches []float64 `json:"pitches,omitempty"`
 	// Coverage is 0..1: the share of the sphere that was actually photographed.
 	Coverage    float64 `json:"coverage,omitempty"`
 	Degraded    bool    `json:"degraded"` // true when stitch failed and we fell back

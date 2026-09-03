@@ -254,29 +254,66 @@ func ringLabelFor(yaw float64, i int, step float64) (label, icon, hint string) {
 }
 
 // SpinPlan builds the shot list for orbiting an object on a turntable.
+//
+// Three heights, not one. A single level ring shows an object only from the
+// side, so a viewer dragging upward sees nothing change and the lid, top face
+// or underside are never photographed at all. Shooting a raised and a lowered
+// row as well is what makes the spin readable in two axes.
+//
+// frameCount is the total wanted across every row; it is rounded up so the
+// rows stay equal, because an uneven ring makes the viewer's drag speed jump
+// as it crosses the short row.
 func SpinPlan(frameCount int) Plan {
-	if frameCount < 4 {
-		frameCount = 4
+	if frameCount < SpinMinFrames {
+		frameCount = SpinMinFrames
 	}
-	step := 360.0 / float64(frameCount)
-	slots := make([]Slot, 0, frameCount)
-	for i := 0; i < frameCount; i++ {
-		slots = append(slots, Slot{
-			ID: fmt.Sprintf("spin_%d", i), Index: i,
-			Label: fmt.Sprintf("Shot %d of %d", i+1, frameCount),
-			Hint:  fmt.Sprintf("Rotate the object %.0f° and shoot again.", step),
-			Icon:  "↻", Yaw: float64(i) * step, Group: GroupCore, Required: true,
-		})
+	perRow := (frameCount + len(spinRows) - 1) / len(spinRows)
+	if perRow < SpinMinPerRow {
+		perRow = SpinMinPerRow
+	}
+	step := 360.0 / float64(perRow)
+
+	slots := make([]Slot, 0, perRow*len(spinRows))
+	i := 0
+	for _, row := range spinRows {
+		for k := 0; k < perRow; k++ {
+			yaw := float64(k) * step
+			slots = append(slots, Slot{
+				ID:    fmt.Sprintf("spin_%s_%d", row.id, k),
+				Index: i,
+				Label: fmt.Sprintf("%s — %d of %d", row.label, k+1, perRow),
+				Hint:  row.hint,
+				Icon:  row.icon, Yaw: yaw, Pitch: row.pitch,
+				Group: GroupCore, Required: true,
+			})
+			i++
+		}
 	}
 	return Plan{
-		Mode: ModeSpin, Slots: slots, MinRequired: frameCount,
+		Mode: ModeSpin, Slots: slots, MinRequired: len(slots),
 		YawStep: step, AlignTolerance: 15, DuplicateTolerance: step / 2,
 		Tips: []string{
 			"Keep the camera still. Rotate the object, not yourself.",
+			"Shoot all the way round at one height, then raise or lower the camera and go round again.",
 			"Keep the object in the same spot in the frame every time.",
 			"Lock exposure and focus so brightness does not jump between frames.",
 		},
 	}
+}
+
+// Spin capture shoots the same ring from three heights.
+const (
+	SpinMinFrames = 15 // total across every row
+	SpinMinPerRow = 5  // below this the turntable drag looks stepped
+)
+
+var spinRows = []struct {
+	id, label, icon, hint string
+	pitch                 float64
+}{
+	{"high", "From above", "\u2b06", "Raise the camera above the object and angle down at it.", 30},
+	{"mid", "Level", "\u21bb", "Camera level with the middle of the object.", 0},
+	{"low", "From below", "\u2b07", "Lower the camera and angle up at the object.", -30},
 }
 
 // AutoPlan is the "I already have photos" case: no shot list, no directions to

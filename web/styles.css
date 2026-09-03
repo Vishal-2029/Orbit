@@ -570,3 +570,19 @@ img, canvas, video { max-width: 100%; }
   color: #cfd6df;
   opacity: 1;
 }
+
+/* Coverage warning above the finish button. Anything the camera never pointed
+   at is filled with a soft blur in the result, so the warning has to land
+   while the user can still go and shoot it. */
+.cover-warn {
+  margin: 0 auto 8px;
+  max-width: 420px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  font-size: 12px; font-weight: 600; line-height: 1.35;
+  text-align: center;
+  color: #ffd27a;
+  background: rgba(0, 0, 0, .55);
+  backdrop-filter: blur(4px);
+}
+.cover-warn[hidden] { display: none; }

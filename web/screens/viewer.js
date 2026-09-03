@@ -90,7 +90,7 @@ const ScreenViewer = (() => {
           } else {
             loadingText.textContent = `Loading frames… ${Math.round(progress * 100)}%`;
           }
-        });
+        }, { yaws: manifest.yaws, pitches: manifest.pitches });
       }
     } else {
       loadingText.textContent = `Unknown renderer "${manifest.renderer}".`;

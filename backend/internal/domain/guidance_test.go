@@ -87,18 +87,64 @@ func TestEverySlotHasUserFacingText(t *testing.T) {
 
 func TestSpinPlanFullCircleNoRepeat(t *testing.T) {
 	p := SpinPlan(24)
-	if len(p.Slots) != 24 || p.Mode != ModeSpin {
-		t.Fatalf("got %d slots mode %q", len(p.Slots), p.Mode)
+	if p.Mode != ModeSpin {
+		t.Fatalf("mode %q", p.Mode)
 	}
-	if last := p.Slots[23].Yaw; math.Abs(last-345) > 1e-9 {
-		t.Errorf("last yaw = %v, want 345 (must not repeat 0)", last)
+	// Rows of equal length, so the viewer's drag speed does not jump as it
+	// crosses a short row.
+	perRow := map[float64]int{}
+	for _, s := range p.Slots {
+		perRow[s.Pitch]++
+	}
+	if len(perRow) != 3 {
+		t.Fatalf("want 3 pitch rows, got %d (%v)", len(perRow), perRow)
+	}
+	want := len(p.Slots) / 3
+	for pitch, n := range perRow {
+		if n != want {
+			t.Errorf("pitch %v has %d slots, want %d", pitch, n, want)
+		}
+	}
+	// The last shot of a row must not repeat the first.
+	step := 360.0 / float64(want)
+	if last := p.Slots[want-1].Yaw; math.Abs(last-(360-step)) > 1e-9 {
+		t.Errorf("last yaw of row = %v, want %v (must not repeat 0)", last, 360-step)
 	}
 }
 
-func TestSpinPlanClampsToFour(t *testing.T) {
-	for _, n := range []int{-3, 0, 1, 3} {
-		if got := len(SpinPlan(n).Slots); got != 4 {
-			t.Errorf("SpinPlan(%d) gave %d slots, want 4", n, got)
+func TestSpinPlanCoversThreeHeights(t *testing.T) {
+	// A spin shot only at eye level gives a viewer nothing to see when they
+	// drag upward, which is the whole point of the second axis.
+	p := SpinPlan(SpinMinFrames)
+	if len(p.Slots) != SpinMinFrames {
+		t.Fatalf("got %d slots, want %d", len(p.Slots), SpinMinFrames)
+	}
+	var above, level, below bool
+	for _, s := range p.Slots {
+		switch {
+		case s.Pitch > 5:
+			above = true
+		case s.Pitch < -5:
+			below = true
+		default:
+			level = true
+		}
+	}
+	if !above || !level || !below {
+		t.Errorf("want shots above, level and below; got %v/%v/%v", above, level, below)
+	}
+}
+
+func TestSpinPlanClampsToMinimum(t *testing.T) {
+	// Too few frames cannot describe an object from three heights, so small
+	// requests are raised rather than honoured.
+	for _, n := range []int{-3, 0, 1, 3, 14} {
+		p := SpinPlan(n)
+		if got := len(p.Slots); got < SpinMinFrames {
+			t.Errorf("SpinPlan(%d) gave %d slots, want at least %d", n, got, SpinMinFrames)
+		}
+		if p.MinRequired != len(p.Slots) {
+			t.Errorf("SpinPlan(%d): MinRequired %d != slots %d", n, p.MinRequired, len(p.Slots))
 		}
 	}
 }
