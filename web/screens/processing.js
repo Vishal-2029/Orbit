@@ -130,6 +130,10 @@ const ScreenProcessing = (() => {
     logLine(`Connected. Capture status: ${capture.status}.`);
 
     let closedCleanly = false;
+    let poll = null;
+    let stalled = false;
+    // Long enough that a genuinely slow stitch is not accused of dying.
+    const STALL_MS = 90000;
     const ws = OrbitAPI.connectWS(captureId, {
       onOpen: () => logLine("WebSocket connected."),
       onEvent: (ev) => {
@@ -161,22 +165,64 @@ const ScreenProcessing = (() => {
       onError: () => logLine("WebSocket error."),
       onClose: () => {
         logLine("WebSocket closed.");
-        if (!closedCleanly) {
-          // Poll once in case the socket dropped after the finishing event.
-          OrbitAPI.getCapture(captureId).then(({ capture: c }) => {
-            if (c.status === "ready" || c.status === "partial") {
-              OrbitAPI.getManifest(captureId).then((m) =>
-                finish(m, c.status === "partial", m && m.degraded_why)
-              ).catch(() => finish(null, c.status === "partial"));
-            } else if (c.status === "failed") {
-              fail(c.error);
-            }
-          }).catch(() => {});
-        }
+        if (!closedCleanly) startPolling();
       },
     });
 
+    // A dropped socket used to mean a single poll and then silence: if the
+    // capture was still working, the bar sat frozen with no explanation until
+    // the server-side reaper gave up ten minutes later. Free instances sleep,
+    // restart on deploy and drop sockets routinely, so the screen has to be
+    // able to finish the job without one.
+    function startPolling() {
+      if (poll) return;
+      logLine("Reconnecting\u2026 watching progress directly.");
+      let lastProcessed = -1;
+      let stillSince = Date.now();
+      poll = setInterval(async () => {
+        let c;
+        try {
+          ({ capture: c } = await OrbitAPI.getCapture(captureId));
+        } catch (_) {
+          return;   // instance asleep or restarting; try again next tick
+        }
+        if (c.status === "ready" || c.status === "partial") {
+          stopPolling();
+          let m = null;
+          try { m = await OrbitAPI.getManifest(captureId); } catch (_) {}
+          finish(m, c.status === "partial", m && m.degraded_why);
+          return;
+        }
+        if (c.status === "failed") {
+          stopPolling();
+          fail(c.error);
+          return;
+        }
+        statusLine.textContent = `Status: ${c.status}`;
+        setProgress(c.processed_count ? (c.processed_count * 80) / total : 0, c.processed_count, total);
+
+        // Every frame done but no result is the signature of a worker that
+        // died during the final stitch. The reaper will fail it eventually;
+        // there is no reason to make the user wait that out in silence.
+        if (c.processed_count !== lastProcessed) {
+          lastProcessed = c.processed_count;
+          stillSince = Date.now();
+        } else if (Date.now() - stillSince > STALL_MS && !stalled) {
+          stalled = true;
+          banner.innerHTML = `<div class="banner warn">This build has stopped making progress.` +
+            ` The worker may have run out of memory during the final stitch.` +
+            ` Your photos are safe — you can build it again.</div>`;
+          offerRetry();
+        }
+      }, 5000);
+    }
+
+    function stopPolling() {
+      if (poll) { clearInterval(poll); poll = null; }
+    }
+
     return () => {
+      stopPolling();
       try { ws.close(); } catch (_) {}
     };
   }
