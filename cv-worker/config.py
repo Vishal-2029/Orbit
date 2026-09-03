@@ -15,9 +15,11 @@ def _envint(k, default):
 
 
 class Settings:
-    # Redis
+    # Redis. Managed providers hand out a rediss:// URL carrying a password and
+    # requiring TLS, which host/port cannot express; redis_url wins when set.
     redis_host = _env("REDIS_HOST", "localhost")
     redis_port = _envint("REDIS_PORT", 6380)
+    redis_url = _env("REDIS_URL", "")
     stream_jobs = "orbit:jobs"
     group_workers = "cv-workers"
     stream_dlq = "orbit:jobs:dlq"

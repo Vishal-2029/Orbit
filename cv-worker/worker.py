@@ -60,18 +60,9 @@ signal.signal(signal.SIGINT, _handle_sigterm)
 # --------------------------------------------------------------------------
 
 def make_redis():
+    if settings.redis_url:
+        return redis.Redis.from_url(settings.redis_url, decode_responses=True)
     return redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
-
-
-def make_minio():
-    if Minio is None:
-        raise RuntimeError("minio package not installed")
-    return Minio(
-        settings.minio_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_use_ssl,
-    )
 
 
 def ensure_group(rdb):
@@ -652,9 +643,9 @@ def reclaim_abandoned(rdb, mc):
 
 
 def main():
-    log.info("%s starting, redis=%s:%s minio=%s api=%s",
-              PREFIX, settings.redis_host, settings.redis_port,
-              settings.minio_endpoint, settings.api_base_url)
+    redis_desc = "url" if settings.redis_url else f"{settings.redis_host}:{settings.redis_port}"
+    log.info("%s starting, redis=%s minio=%s api=%s",
+              PREFIX, redis_desc, settings.minio_endpoint, settings.api_base_url)
     rdb = make_redis()
     mc = make_minio()
 
