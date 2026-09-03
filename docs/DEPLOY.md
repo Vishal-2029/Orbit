@@ -165,7 +165,7 @@ Build the Go binary once (`make build`) and point `ExecStart` at
 | **Fly.io** | None for new accounts | No longer has a free tier. |
 | **Railway** | $5 trial, then $1/month credit | Enough to try, not to run. |
 | **Koyeb** | Closed to new users | Acquired in 2026, free tier withdrawn. |
-| **Google Cloud Run** | Generous request-based tier | Scales to zero, so a stream consumer cannot live there without rework. |
+| **Google Cloud Run** | Request-based tier plus Worker Pools | Use a Worker Pool for the always-running Redis stream consumer; a normal service scales to zero. |
 
 ### A managed split, if you would rather not run a VM
 
@@ -176,9 +176,14 @@ Free-tier managed pieces do exist:
 - **Cloudflare R2** — 10 GB storage, S3-compatible, so `storage/minio.go` works
   unchanged
 
-But **there is no free host for the CV worker**, which is the one piece that
-must be always-on with ~700 MB of headroom. You would still need the VM. Given
-that, running everything on it is simpler and costs the same: nothing.
+The CV worker is the hard part: it must be always-on, which rules out hosts
+that scale to zero. Its stitch peaks at ~380 MiB with phone-sized photos, so
+memory is less of a constraint than it looks. Cloud Run Worker Pools can do it
+but require a billing-enabled project. A **free Hugging Face Space** on the
+Docker SDK runs it as a plain container with 16 GB of RAM and no billing, which
+is the cheapest arrangement that actually stays running. See
+[`DEPLOY-FREE.md`](DEPLOY-FREE.md) for the full free deployment, or
+[`DEPLOY-RENDER-VERCEL.md`](DEPLOY-RENDER-VERCEL.md) for the Cloud Run variant.
 
 ---
 

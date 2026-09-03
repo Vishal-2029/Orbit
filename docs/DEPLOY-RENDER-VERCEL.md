@@ -1,11 +1,16 @@
 # Deploy Orbit with Render and Vercel
 
+> Looking for a deployment that costs nothing? See
+> [DEPLOY-FREE.md](DEPLOY-FREE.md), which avoids the paid Render instances and
+> the billing-enabled Google Cloud project this guide assumes.
+
 This guide covers two deployment choices:
 
 - **Docker:** run PostgreSQL, Redis, MinIO, the API, and the CV worker together
 	with the repository's `docker-compose.yml`.
-- **Render + Vercel:** run the API and CV worker on Render, and the static web
-	client on Vercel. Render does not run this Compose stack for you.
+- **Render + Vercel + Google Cloud Run:** run the API on Render, the CV worker
+	on a Google Cloud Run Worker Pool, and the static web client on Vercel.
+	Render does not run this Compose stack for you.
 
 The Render/Vercel setup needs provider-generated URLs and credentials, so those
 values cannot be known before you create the services. Every value below that
@@ -73,12 +78,12 @@ Delete all local database and image data with:
 docker compose down -v
 ```
 
-## Render + Vercel deployment
+## Render + Cloud Run + Vercel deployment
 
 For this deployment:
 
 - **Render Web Service:** Go API and WebSocket server
-- **Render Background Worker:** Python CV worker
+- **Google Cloud Run Worker Pool:** Python CV worker in Docker
 - **Render PostgreSQL:** application database
 - **Redis-compatible service:** job queue and progress events
 - **S3-compatible object storage:** uploaded and processed images
@@ -88,7 +93,13 @@ For this deployment:
 
 ## Important hosting constraint
 
-The CV worker is not a serverless function. It continuously consumes Redis jobs and can use about 700 MB while stitching. Render's smallest/free instance is likely to sleep or run out of memory during processing. Use an always-on Render instance with enough memory for the worker, or keep the worker on a VM such as Oracle Cloud and deploy only the API on Render.
+The CV worker is not a request-driven serverless function. It continuously
+consumes Redis jobs, peaking around 380 MiB while stitching phone-sized photos. Do not deploy it
+as a normal Cloud Run service: request-driven services can scale to zero and
+are subject to request lifetimes. Use a Cloud Run Worker Pool with at least
+2 GiB memory, configured to keep a worker running. The worker needs outbound
+network access to the Redis service, S3-compatible storage, and public Render
+API. It does not need inbound HTTP access.
 
 Render's filesystem is ephemeral. Do not use a local MinIO container or local disk for permanent photos. Use an external S3-compatible service such as Cloudflare R2, AWS S3, or another provider.
 
@@ -104,7 +115,8 @@ In the Render dashboard:
 
 1. Create a PostgreSQL database.
 2. Copy its **internal connection string**.
-3. Use that value as `DATABASE_URL` on both Render services if the services are in the same Render region.
+3. Use that value as `DATABASE_URL` on the Render API service. The Cloud Run
+	worker does not connect to PostgreSQL.
 
 Run the migrations after the database is available:
 
@@ -133,7 +145,13 @@ REDIS_HOST=<redis-host>
 REDIS_PORT=<redis-port>
 ```
 
-If the Redis provider requires TLS or a password, verify that the provider supports the connection style used by this repository before deploying. The current code uses a plain host/port connection and does not read a Redis URL or password.
+If the Redis provider requires TLS or a password, set `REDIS_URL` instead on both the API and the worker:
+
+```env
+REDIS_URL=rediss://default:<password>@<host>:<port>
+```
+
+`REDIS_URL` overrides the host/port variables on both services.
 
 ## 4. Create S3-compatible object storage
 
@@ -211,16 +229,35 @@ Expected response contains:
 {"status":"ok","service":"orbit-api"}
 ```
 
-## 6. Deploy the Render CV worker with Docker
+## 6. Deploy the CV worker on Google Cloud Run
 
-Create a **Background Worker** using the same repository and region:
+Enable Cloud Run and Artifact Registry in a Google Cloud project, and select a
+region close to the Render API, Redis, and S3-compatible storage:
 
-- **Root Directory:** leave empty
-- **Environment:** Docker
-- **Dockerfile Path:** `cv-worker/Dockerfile`
-- **Docker Context:** repository root (`.`)
+```bash
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com \\
+	cloudbuild.googleapis.com
+gcloud config set project REPLACE_GCP_PROJECT_ID
+gcloud artifacts repositories create orbit \\
+	--repository-format=docker \\
+	--location=REPLACE_GCP_REGION
+```
 
-Set these environment variables on the worker:
+Build the worker image from the repository root and push it to Artifact
+Registry:
+
+```bash
+gcloud builds submit \\
+	--tag REPLACE_GCP_REGION-docker.pkg.dev/REPLACE_GCP_PROJECT_ID/orbit/cv-worker:latest \\
+	--file=cv-worker/Dockerfile .
+```
+
+Create a Cloud Run Worker Pool (or choose **Worker pools** in the Cloud Run
+console) using that image. Configure at least **2 GiB memory**, one CPU, and a
+worker count of 1 for the first deployment. Keep the pool running; do not use
+scale-to-zero for this Redis Streams consumer.
+
+Set these environment variables on the worker pool:
 
 ```env
 REDIS_HOST=REPLACE_REDIS_HOST
@@ -237,7 +274,16 @@ THUMB_WIDTH=500
 JPEG_QUALITY=85
 ```
 
-Give this worker enough memory for OpenCV and stitching. Watch its logs while processing a test capture. A worker that sleeps, restarts, or is killed for memory will leave captures stuck in `processing` until the API reaper handles them.
+`REDIS_HOST` and `REDIS_PORT` must be reachable from Cloud Run. Do not use a
+Render-internal hostname or port; use a Redis provider endpoint that permits
+Cloud Run egress. The S3 endpoint must also be externally reachable. If the
+Redis provider requires TLS or a password, set `REDIS_URL` instead of the
+host/port pair.
+
+Watch the Cloud Run Worker Pool logs while processing a test capture through
+the Render API. A worker pool that scales to zero, restarts, or is killed for
+memory will leave captures stuck in `processing` until the API reaper handles
+them. Confirm the pool remains active and inspect failures in Cloud Logging.
 
 ## 7. Deploy the web client to Vercel
 
@@ -285,7 +331,7 @@ Then in the Vercel site:
 1. Create a capture.
 2. Upload at least four photos.
 3. Start processing.
-4. Confirm the Render worker logs show frame jobs.
+4. Confirm the Cloud Run Worker Pool logs show frame jobs.
 5. Confirm the capture becomes `ready` or `partial`.
 6. Open the generated share link and verify the images load.
 
@@ -327,4 +373,8 @@ If the capture remains `queued`, check Redis connectivity and the worker logs. I
 
 ## Recommended production topology
 
-For a low-cost but reliable deployment, use Render for the API and PostgreSQL, an external Redis service, external S3-compatible storage, and a paid always-on Render worker with at least 1 GB of memory. Vercel can host the static frontend, but the frontend's API and WebSocket base URLs must be configured as described above.
+For a low-cost deployment, use Render for the API and PostgreSQL, an external
+Redis service, external S3-compatible storage, and a Cloud Run Worker Pool for
+the worker. Cloud Run pricing and free-tier eligibility vary by region and
+resource usage. Vercel can host the static frontend, but the frontend's API
+and WebSocket base URLs must be configured as described above.
