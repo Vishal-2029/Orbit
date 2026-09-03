@@ -6,6 +6,7 @@ cv2.Stitcher status codes:
   ERR_HOMOGRAPHY_EST_FAIL = 2
   ERR_CAMERA_PARAMS_ADJUST_FAIL = 3
 """
+import gc
 import logging
 
 import cv2
@@ -62,6 +63,12 @@ def stitch_panorama(images):
             # panorama, which is why the default leaves it at full resolution.
             if settings.stitch_compositing_mp > 0:
                 stitcher.setCompositingResol(settings.stitch_compositing_mp)
+            # Feature finding and matching run at their own resolution, and on
+            # detailed real-world photos that is a second large allocation -
+            # far larger than on the flat test images this was first tuned
+            # against. Shrink it alongside the compositing cap.
+            if settings.stitch_registration_mp > 0:
+                stitcher.setRegistrationResol(settings.stitch_registration_mp)
             status, pano = stitcher.stitch(images)
         except cv2.error as e:
             log.warning("[orbit-worker] stitcher mode=%s raised cv2.error: %s", name, e)
@@ -78,5 +85,10 @@ def stitch_panorama(images):
 
         last_reason = _status_message(status)
         log.warning("[orbit-worker] stitcher mode=%s failed status=%s (%s)", name, status, last_reason)
+        # A failed attempt still allocated everything a successful one would.
+        # Holding it while the next mode allocates its own copy doubles the
+        # peak, and the second attempt is exactly when memory is tightest.
+        del stitcher
+        gc.collect()
 
     return False, None, last_reason

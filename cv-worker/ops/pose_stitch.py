@@ -13,10 +13,13 @@ This is the approach Street View capture uses, and it is why it copes with
 surfaces that defeat pure feature matching.
 """
 import logging
+import gc
 import math
 
 import cv2
 import numpy as np
+
+from config import settings
 
 log = logging.getLogger("orbit-worker")
 
@@ -127,17 +130,18 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         # Shrink the sources so the sphere stays within budget. Done once, up
         # front, because every later buffer is sized off this.
         _, full_focal = intrinsics(w, h, hfov_deg)
-        scale = min(1.0, MAX_CIRCUMFERENCE_PX / (2 * math.pi * full_focal))
+        scale = min(1.0, settings.pose_circumference_px / (2 * math.pi * full_focal))
         if scale < 1.0:
             w, h = max(1, int(w * scale)), max(1, int(h * scale))
             log.info("[orbit-worker] scaling sources by %.2f to %dx%d "
                      "so the sphere stays within %d px around",
-                     scale, w, h, MAX_CIRCUMFERENCE_PX)
+                     scale, w, h, settings.pose_circumference_px)
 
         K, focal = intrinsics(w, h, hfov_deg)
         warper = cv2.PyRotationWarper("spherical", focal)
 
         warped, masks, corners = [], [], []
+        running_px = 0
         for i in usable:
             img = images[i]
             if img.shape[:2] != (h, w):
@@ -158,13 +162,27 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             masks.append(wmask)
             corners.append(corner)
 
-        total_px = sum(im.shape[0] * im.shape[1] for im in warped)
-        if total_px > MAX_TILE_PIXELS:
-            log.warning("[orbit-worker] %d warped tiles total %.0f Mpx, over the "
-                        "%.0f Mpx budget; refusing rather than exhausting memory",
-                        len(warped), total_px / 1e6, MAX_TILE_PIXELS / 1e6)
-            return False, None, ("There are too many large photos in this capture "
-                                 "to place them all at once. Try again with fewer.")
+            # Check as we go, not after the loop. Measuring the finished list
+            # only reports how much memory was already taken - on a small
+            # instance the process is killed partway through the warping and the
+            # guard never runs at all. A photo aimed at the sky or the floor
+            # warps toward a pole, where a spherical projection stretches
+            # without bound, so a single shot can blow the budget on its own.
+            running_px += wimg.shape[0] * wimg.shape[1]
+            if running_px > settings.pose_tile_budget_px:
+                log.warning("[orbit-worker] warped tiles reached %.0f Mpx after %d of "
+                            "%d photos, over the %.0f Mpx budget; stopping here",
+                            running_px / 1e6, len(warped), len(usable),
+                            settings.pose_tile_budget_px / 1e6)
+                del warped[-1], masks[-1], corners[-1]
+                running_px -= wimg.shape[0] * wimg.shape[1]
+                del wimg, wmask
+                gc.collect()
+                break
+
+        if len(warped) < 2:
+            return False, None, ("These photos are too large to place onto a sphere. "
+                                 "Try again with fewer or smaller photos.")
 
         pano = _blend(warped, masks, corners)
         if pano is None:

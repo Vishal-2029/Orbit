@@ -54,6 +54,14 @@ def _cgroup_memory_limit_mb():
     return None
 
 
+def _auto_tile_budget_px():
+    """Total warped-tile pixels the host can hold, from its memory limit."""
+    limit = _cgroup_memory_limit_mb()
+    if limit is None:
+        return 120_000_000          # unconstrained host: the historical budget
+    return max(12_000_000, (limit * 1024 * 1024 // 3) // 4)
+
+
 def _auto_compositing_mp():
     """Cap the stitch on a small instance; leave full resolution on a big one.
 
@@ -104,6 +112,23 @@ class Settings:
     # setting an env var they cannot verify, the cap is chosen from the memory
     # limit the container was actually given. An explicit value always wins.
     stitch_compositing_mp = float(_env("STITCH_COMPOSITING_MP", "0")) or _auto_compositing_mp()
+
+    # Resolution the stitcher finds and matches features at. OpenCV's default is
+    # 0.6 Mpx. Detailed real-world photos make this a second large allocation,
+    # so it is trimmed on a small instance alongside the compositing cap.
+    stitch_registration_mp = float(_env("STITCH_REGISTRATION_MP", "0")) or (
+        0.4 if _auto_compositing_mp() else 0.0)
+
+    # Pose stitching holds every warped tile and its mask at once, so its budget
+    # has to come from the memory the container actually has rather than a fixed
+    # constant sized for a big machine. Roughly 4 bytes per pixel (BGR + mask),
+    # and no more than a third of the limit, leaving room for the source frames
+    # and the finished panorama.
+    pose_tile_budget_px = int(_env("POSE_TILE_BUDGET_PX", "0")) or _auto_tile_budget_px()
+    # Pixels around the sphere's equator. Smaller means smaller tiles from the
+    # very first warp, which is the only saving that arrives early enough.
+    pose_circumference_px = int(_env("POSE_CIRCUMFERENCE_PX", "0")) or (
+        2560 if _cgroup_memory_limit_mb() and _cgroup_memory_limit_mb() <= 768 else 4096)
 
     # Retry / backoff
     max_attempts = _envint("MAX_ATTEMPTS", 3)
