@@ -232,7 +232,11 @@ def _compensate_exposure(warped, masks, corners):
 # about a tenth of a megapixel: the cut line only needs to be roughly right,
 # and the finder is expensive enough that running it at full size is what
 # pushed a 13-photo capture past 8GB.
-SEAM_WORK_MEGAPIX = 0.1
+# Resolution the seam is searched at, per photo. The seam mask is found here
+# and scaled back up, so this number decides how finely the cut can follow real
+# edges in the scene. At 0.1 the cut was found at roughly a fifth scale and
+# arrived back as a visible staircase along building edges.
+SEAM_WORK_MEGAPIX = settings.seam_work_megapix
 
 
 def _find_seams(warped, masks, corners):
@@ -266,10 +270,21 @@ def _find_seams(warped, masks, corners):
 
         # Scale each seam mask back up and intersect with the real coverage, so
         # the seam can only ever remove pixels, never invent them.
+        #
+        # The upscaled mask is kept soft rather than thresholded back to black
+        # and white. Rounding it to a hard edge re-quantised the boundary onto
+        # the low-resolution grid it was found on, which is what put a visible
+        # staircase along the join. MultiBandBlender normalises by total weight,
+        # so a soft mask simply hands over gradually across those few pixels.
         for i, um in enumerate(small_masks):
             grown = cv2.resize(um.get(), (masks[i].shape[1], masks[i].shape[0]),
                                interpolation=cv2.INTER_LINEAR)
-            masks[i] = cv2.bitwise_and(masks[i], (grown > 127).astype(np.uint8) * 255)
+            # Blur by roughly the size of one low-resolution pixel, so the
+            # handover spans the uncertainty in where the seam actually is.
+            k = max(1, int(round(1.0 / max(scale, 1e-6))))
+            if k > 1:
+                grown = cv2.GaussianBlur(grown, (0, 0), sigmaX=k / 2.0)
+            masks[i] = np.minimum(masks[i], grown).astype(np.uint8)
         return True
     except Exception as e:
         log.debug("[orbit-worker] seam finding skipped: %s", e)
@@ -296,9 +311,23 @@ def _blend(warped, masks, corners):
     seamed = _find_seams(warped, masks, corners)
 
     blender = cv2.detail_MultiBandBlender()
-    # With a seam chosen, only a narrow band needs feathering to hide the cut.
-    # Blending across many bands would smear the very detail the seam preserved.
-    blender.setNumBands(3 if seamed else 5)
+    # The number of bands sets how wide the handover between two photos is, in
+    # pixels, and it has to scale with the canvas: a fixed 3 gave roughly an
+    # eight-pixel transition on a four-thousand-pixel panorama, far too abrupt
+    # to hide a join, so every seam stayed visible as a hard line.
+    #
+    # This is the rule OpenCV's own Stitcher uses - a blend width of 5% of the
+    # square root of the canvas area - which lands around 6 bands here.
+    blend_width = math.sqrt(float((x1 - x0) * (y1 - y0))) * 0.05
+    bands = int(math.ceil(math.log(max(blend_width, 2.0)) / math.log(2.0))) - 1
+    bands = max(3, min(7, bands))
+    if not seamed:
+        # No seam was chosen, so the overlap is a plain cross-fade and wants a
+        # wider one to avoid a visible edge.
+        bands = min(7, bands + 1)
+    log.info("[orbit-worker] blending %d photos onto %dx%d with %d bands",
+             len(warped), x1 - x0, y1 - y0, bands)
+    blender.setNumBands(bands)
     blender.prepare((x0, y0, x1 - x0, y1 - y0))
     for im, mask, corner in zip(warped, masks, corners):
         blender.feed(im.astype(np.int16), mask, corner)

@@ -125,6 +125,13 @@ class Settings:
     # and no more than a third of the limit, leaving room for the source frames
     # and the finished panorama.
     pose_tile_budget_px = int(_env("POSE_TILE_BUDGET_PX", "0")) or _auto_tile_budget_px()
+    # Megapixels per photo used when searching for the seam between two
+    # overlapping shots. Higher lets the cut follow real edges in the scene
+    # instead of stepping across a coarse grid; the working images are small
+    # and short-lived, so this is cheap next to the warped tiles.
+    seam_work_megapix = float(_env("SEAM_WORK_MEGAPIX", "0")) or (
+        0.2 if _auto_compositing_mp() else 0.4)
+
     # Pixels around the sphere's equator. Smaller means smaller tiles from the
     # very first warp, which is the only saving that arrives early enough.
     pose_circumference_px = int(_env("POSE_CIRCUMFERENCE_PX", "0")) or (
