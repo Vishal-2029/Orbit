@@ -10,6 +10,7 @@ type Config struct {
 	PublicBaseURL string // how the browser reaches this API, used to build manifest URLs
 	DatabaseURL   string
 	RedisAddr     string
+	RedisURL      string // full redis:// or rediss:// URL, wins over RedisAddr when set
 	MinIOEndpoint string
 	MinIOAccess   string
 	MinIOSecret   string
@@ -43,6 +44,7 @@ func Load() Config {
 		PublicBaseURL: env("PUBLIC_BASE_URL", "http://localhost:8080"),
 		DatabaseURL:   env("DATABASE_URL", "postgres://orbit:orbit@localhost:5433/orbit?sslmode=disable"),
 		RedisAddr:     env("REDIS_ADDR", "localhost:6380"),
+		RedisURL:      env("REDIS_URL", ""),
 		MinIOEndpoint: env("MINIO_ENDPOINT", "localhost:9010"),
 		MinIOAccess:   env("MINIO_ACCESS_KEY", "orbitadmin"),
 		MinIOSecret:   env("MINIO_SECRET_KEY", "orbitadmin123"),

@@ -40,7 +40,18 @@ func main() {
 		log.Fatalf("minio: %v (is `docker compose up -d` running?)", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	// Managed Redis providers hand out a rediss:// URL carrying a password and
+	// requiring TLS, which a bare host:port cannot express. REDIS_URL wins when
+	// set; REDIS_ADDR stays the plain-connection path used by Docker Compose.
+	redisOpts := &redis.Options{Addr: cfg.RedisAddr}
+	if cfg.RedisURL != "" {
+		parsed, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			log.Fatalf("redis: bad REDIS_URL: %v", err)
+		}
+		redisOpts = parsed
+	}
+	rdb := redis.NewClient(redisOpts)
 	if err := rdb.Ping(boot).Err(); err != nil {
 		log.Fatalf("redis: %v (is `docker compose up -d` running?)", err)
 	}
