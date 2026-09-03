@@ -292,6 +292,34 @@ func (r *Repo) MarkFrameFailed(ctx context.Context, frameID, reason string) erro
 	return err
 }
 
+// ResetForReprocess clears the results of a previous run so the same photos can
+// be built again from scratch.
+//
+// Without this a retry inherits the old state: frames are still marked done, so
+// processed_count recounts to full immediately and the progress bar sits at
+// 100% from the first second, while the stale manifest keeps being served until
+// finalize happens to overwrite it. The originals are untouched - they are what
+// is being reprocessed.
+func (r *Repo) ResetForReprocess(ctx context.Context, captureID string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE frames SET status='pending', error=NULL, processed_key=NULL, thumb_key=NULL
+		WHERE capture_id=$1`, captureID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE captures SET manifest=NULL, error=NULL, processed_count=0, updated_at=now()
+		WHERE id=$1`, captureID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *Repo) SetFrameCount(ctx context.Context, captureID string, n int) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE captures SET frame_count=$2, updated_at=now() WHERE id=$1`, captureID, n)

@@ -30,6 +30,12 @@ const ScreenProcessing = (() => {
           <div id="doneRow" style="display:none">
             <button class="primary" id="viewBtn" style="width:100%">View my 360 →</button>
           </div>
+          <div id="retryRow" style="display:none">
+            <button id="retryBtn" style="width:100%">Build it again</button>
+            <div class="muted" style="margin-top:8px;font-size:.85rem">
+              Uses the same photos. The previous result is discarded.
+            </div>
+          </div>
         </div>
       </div>`;
 
@@ -41,6 +47,28 @@ const ScreenProcessing = (() => {
     const banner = app.querySelector("#banner");
     const doneRow = app.querySelector("#doneRow");
     const viewBtn = app.querySelector("#viewBtn");
+    const retryRow = app.querySelector("#retryRow");
+    const retryBtn = app.querySelector("#retryBtn");
+
+    // A fallback view or an outright failure is usually not the photos' fault -
+    // a worker that ran out of memory produces both - so offer the same photos
+    // to another run rather than making the user shoot the whole thing again.
+    function offerRetry() {
+      retryRow.style.display = "block";
+      retryBtn.onclick = async () => {
+        retryBtn.disabled = true;
+        retryBtn.textContent = "Starting\u2026";
+        try {
+          await OrbitAPI.process(captureId);
+          // Remount so this screen watches the new run from the start.
+          Router.reload();
+        } catch (e) {
+          retryBtn.disabled = false;
+          retryBtn.textContent = "Build it again";
+          banner.innerHTML = `<div class="banner bad">Could not start again: ${escapeHtml(e.message)}</div>`;
+        }
+      };
+    }
 
     const total = capture.frame_count || 0;
     const tickState = new Array(total).fill("pending");
@@ -74,11 +102,13 @@ const ScreenProcessing = (() => {
       }
       doneRow.style.display = "block";
       viewBtn.onclick = () => Router.navigate(`#/view-id/${captureId}`);
+      if (degraded) offerRetry();
     }
 
     function fail(message) {
       statusLine.textContent = "Processing failed";
       banner.innerHTML = `<div class="banner bad">${escapeHtml(message || "Something went wrong while building your 360.")}</div>`;
+      offerRetry();
     }
 
     // If it's already done (e.g. user navigated back here), short-circuit.

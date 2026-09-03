@@ -259,6 +259,12 @@ func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Captur
 			plan.MinRequired, len(frames), domain.CameraHFOV, plan.YawStep)
 	}
 
+	// Building again over an earlier attempt has to start from a clean slate,
+	// or the old manifest keeps being served and progress reads as already
+	// finished. Harmless on a first run: there is nothing to clear.
+	if err := s.repo.ResetForReprocess(ctx, captureID); err != nil {
+		return nil, err
+	}
 	if err := s.repo.SetFrameCount(ctx, captureID, len(frames)); err != nil {
 		return nil, err
 	}

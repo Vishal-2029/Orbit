@@ -30,7 +30,6 @@ const ScreenHome = (() => {
           <h3 class="muted" style="margin:22px 0 8px">Previous captures</h3>
           <div id="captureList" class="capture-list"><p class="muted">Loading…</p></div>
         </div>
-        <footer class="hint">API: ${window.ORBIT_API_BASE}</footer>
       </div>
     `;
 

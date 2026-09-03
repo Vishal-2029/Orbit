@@ -51,5 +51,8 @@ const Router = (() => {
   window.addEventListener("DOMContentLoaded", render);
   if (document.readyState !== "loading") render();
 
-  return { navigate: (h) => (location.hash = h) };
+  // Re-mounting the route you are already on cannot go through navigate():
+  // assigning the hash its current value fires no hashchange, so nothing
+  // re-renders. Reprocessing a capture needs exactly that.
+  return { navigate: (h) => (location.hash = h), reload: render };
 })();
