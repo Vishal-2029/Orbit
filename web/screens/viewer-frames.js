@@ -26,7 +26,13 @@ const FramesViewer = (() => {
       idx.sort((a, b) => yaws[a] - yaws[b]));
     // A row with a single frame is noise, not a viewing height - fold it back
     // in rather than letting a drag land on a row that cannot turn.
-    return rows.length > 1 && rows.every((r) => r.length > 1) ? rows : [rows.flat()];
+    if (rows.length > 1 && rows.every((r) => r.length > 1)) return rows;
+    // Collapsing has to re-sort by angle, not just concatenate the rows. A
+    // capture that fell back to this viewer usually has a clean ring plus a
+    // ceiling and floor shot; joining the groups end to end put the ceiling
+    // first and the floor last, so dragging jumped backwards mid-turn instead
+    // of going round once.
+    return [Array.from({ length: n }, (_, i) => i).sort((a, b) => yaws[a] - yaws[b])];
   }
 
   function create(host, frameUrls, onLoadProgress, angles) {
