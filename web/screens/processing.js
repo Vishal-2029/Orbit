@@ -11,7 +11,10 @@ const ScreenProcessing = (() => {
 
     app.innerHTML = `
       <div class="screen">
-        <div class="topbar"><h1>Building your 360</h1></div>
+        <div class="topbar">
+          <button class="back" onclick="location.hash='#/'" title="Back to home">←</button>
+          <h1>Building your 360</h1>
+        </div>
         <div class="container">
           <div id="banner"></div>
           <div class="card">
