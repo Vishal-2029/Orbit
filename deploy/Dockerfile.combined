@@ -1,0 +1,35 @@
+# Orbit API and CV worker in one container, for hosts that bill per service.
+#
+# The Go binary is built static (CGO_ENABLED=0) so it runs on the Debian-based
+# Python image the worker needs for OpenCV. Both processes then share one
+# instance and reach Redis over the platform's internal network.
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+COPY backend/go.mod backend/go.sum ./backend/
+RUN cd backend && go mod download
+COPY backend ./backend
+RUN cd backend && CGO_ENABLED=0 go build -o /out/orbit-api ./cmd/api
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY cv-worker/requirements.txt /app/cv-worker/requirements.txt
+RUN pip install --no-cache-dir -r /app/cv-worker/requirements.txt
+
+COPY --from=build /out/orbit-api /app/orbit-api
+COPY cv-worker /app/cv-worker
+COPY web /app/web
+COPY deploy/start-combined.sh /app/start-combined.sh
+RUN chmod +x /app/start-combined.sh
+
+EXPOSE 8080
+ENTRYPOINT ["/app/start-combined.sh"]
