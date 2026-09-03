@@ -65,6 +65,44 @@ def make_redis():
     return redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
 
 
+def start_health_server():
+    """Serve /health on HEALTH_PORT so port-requiring hosts keep us alive.
+
+    Runs on a daemon thread; the job loop stays the only real work.
+    """
+    if not settings.health_port:
+        return
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"status":"ok","service":"orbit-cv-worker"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # keep job logs readable
+            pass
+
+    server = HTTPServer(("0.0.0.0", settings.health_port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log.info("%s health server listening on :%s", PREFIX, settings.health_port)
+
+
+def make_minio():
+    if Minio is None:
+        raise RuntimeError("minio package not installed")
+    return Minio(
+        settings.minio_endpoint,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+        secure=settings.minio_use_ssl,
+    )
+
+
 def ensure_group(rdb):
     try:
         rdb.xgroup_create(settings.stream_jobs, settings.group_workers, id="0", mkstream=True)
@@ -646,6 +684,7 @@ def main():
     redis_desc = "url" if settings.redis_url else f"{settings.redis_host}:{settings.redis_port}"
     log.info("%s starting, redis=%s minio=%s api=%s",
               PREFIX, redis_desc, settings.minio_endpoint, settings.api_base_url)
+    start_health_server()
     rdb = make_redis()
     mc = make_minio()
 

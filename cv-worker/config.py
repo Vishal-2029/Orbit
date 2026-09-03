@@ -55,6 +55,10 @@ class Settings:
     # Consumer loop
     block_ms = _envint("BLOCK_MS", 5000)
 
+    # Some free hosts (Hugging Face Spaces) only keep a container alive if it
+    # listens on a port. This worker serves nothing but /health there.
+    health_port = _envint("HEALTH_PORT", 0)
+
     # A job still unacknowledged after this long belongs to a worker that died
     # mid-way. Another worker takes it over. Must comfortably exceed the
     # slowest legitimate job (a big stitch), or healthy work gets stolen.
