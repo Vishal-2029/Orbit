@@ -7,6 +7,7 @@ the Go API via its internal HTTP callbacks. See README.md for details.
 """
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -684,6 +685,15 @@ def main():
     redis_desc = "url" if settings.redis_url else f"{settings.redis_host}:{settings.redis_port}"
     log.info("%s starting, redis=%s minio=%s api=%s",
               PREFIX, redis_desc, settings.minio_endpoint, settings.api_base_url)
+    # The memory settings decide whether a stitch survives on a small instance,
+    # and an OOM kill leaves no trace of its own - the container simply
+    # restarts. Print them so a deploy can be checked from the log alone.
+    from config import _cgroup_memory_limit_mb
+    log.info("%s memory limit=%s MiB, target_width=%s, compositing=%s Mpx (%s)",
+             PREFIX, _cgroup_memory_limit_mb() or "unlimited",
+             settings.target_width_default,
+             settings.stitch_compositing_mp or "full",
+             "explicit" if os.environ.get("STITCH_COMPOSITING_MP") else "auto")
     start_health_server()
     rdb = make_redis()
     mc = make_minio()

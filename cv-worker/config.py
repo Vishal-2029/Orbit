@@ -28,6 +28,45 @@ def _envint(k, default):
         return default
 
 
+def _cgroup_memory_limit_mb():
+    """The container's memory ceiling in MiB, or None when not limited.
+
+    Reads cgroup v2 first, then v1. A host with no limit reports "max" (v2) or
+    a sentinel near 2^63 (v1); both mean "no ceiling".
+    """
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as fh:
+                raw = fh.read().strip()
+        except OSError:
+            continue
+        if raw == "max":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # v1 reports an enormous sentinel rather than "max" when unlimited.
+        if value <= 0 or value >= (1 << 62):
+            return None
+        return value // (1024 * 1024)
+    return None
+
+
+def _auto_compositing_mp():
+    """Cap the stitch on a small instance; leave full resolution on a big one.
+
+    768 MiB is the dividing line: a free 512 MiB instance needs the cap, while
+    anything larger has room for OpenCV's default and should keep the sharper
+    panorama it produces.
+    """
+    limit = _cgroup_memory_limit_mb()
+    if limit is not None and limit <= 768:
+        return 1.2
+    return 0.0
+
+
 class Settings:
     # Redis. Managed providers hand out a rediss:// URL carrying a password and
     # requiring TLS, which host/port cannot express; redis_url wins when set.
@@ -55,11 +94,16 @@ class Settings:
     thumb_width = _envint("THUMB_WIDTH", 500)
     jpeg_quality = _envint("JPEG_QUALITY", 85)
 
-    # Megapixels the stitcher composites at. 0 keeps OpenCV's default, which is
-    # the input resolution and by far the worker's biggest allocation. Set this
-    # on a memory-limited host: 1.2 roughly halves the stitch's peak, at the
-    # cost of a smaller finished panorama.
-    stitch_compositing_mp = float(_env("STITCH_COMPOSITING_MP", "0"))
+    # Megapixels the stitcher composites at. OpenCV's default is the input
+    # resolution, which is by far the worker's largest allocation: +171 MiB over
+    # the loaded frames for a 16-photo ring, against +95 MiB capped to 1.2.
+    #
+    # Left to itself on a 512 MiB instance that difference is an OOM kill, and
+    # the failure is invisible from outside - the container just restarts and
+    # the capture silently falls back. So rather than depending on an operator
+    # setting an env var they cannot verify, the cap is chosen from the memory
+    # limit the container was actually given. An explicit value always wins.
+    stitch_compositing_mp = float(_env("STITCH_COMPOSITING_MP", "0")) or _auto_compositing_mp()
 
     # Retry / backoff
     max_attempts = _envint("MAX_ATTEMPTS", 3)

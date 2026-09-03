@@ -50,13 +50,20 @@ per photo, and that single step is the worker's largest allocation:
 | `STITCH_COMPOSITING_MP=1.2` | 301 MiB |
 | `STITCH_COMPOSITING_MP=0.8` | 276 MiB |
 
-End to end in the combined container under a hard 512 MiB cap, the same capture
-peaks at 434 MiB by default and 357 MiB with `STITCH_COMPOSITING_MP=1.2` —
-78 MiB of headroom against 155 MiB. So set:
+**The worker sets this for itself.** It reads the container's cgroup memory
+limit at startup and caps compositing at 1.2 Mpx when that limit is 768 MiB or
+less, so a free instance is capped and a larger one keeps full resolution. There
+is no env var to remember. Override with `STITCH_COMPOSITING_MP` if you want a
+different value; an explicit setting always wins.
 
-```env
-STITCH_COMPOSITING_MP=1.2
+Confirm what it chose from the first lines of the deploy log:
+
+```text
+[orbit-worker] memory limit=512 MiB, target_width=1600, compositing=1.2 Mpx (auto)
 ```
+
+End to end in the combined container under a hard 512 MiB cap, the same capture
+peaks at 434 MiB uncapped and 354 MiB capped — 78 MiB of headroom against 157.
 
 The trade is a smaller finished panorama (roughly 4214x952 rather than
 5329x1204). If you want full resolution and no memory ceiling, move the worker
