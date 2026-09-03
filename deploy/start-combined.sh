@@ -13,6 +13,13 @@ term() {
 }
 trap term TERM INT
 
+# The worker reports results back to the API over the loopback interface, so it
+# must target whatever port the API actually bound. Hosts inject that (Render
+# uses 10000), so deriving it here beats asking anyone to keep two env vars in
+# sync -- getting it wrong fails every frame with connection refused.
+export API_BASE_URL="${API_BASE_URL:-http://localhost:${PORT:-8080}}"
+echo "[start-combined] api on port ${PORT:-8080}, worker reporting to $API_BASE_URL"
+
 cd /app/cv-worker
 python worker.py &
 WORKER_PID=$!
