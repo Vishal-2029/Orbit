@@ -70,15 +70,7 @@ const ScreenViewer = (() => {
           loadingText.textContent = `Loading panorama… ${Math.round(progress * 100)}%`;
         }
       });
-      // Offer device-orientation look-around behind a tap, iOS-safe.
-      const btn = document.createElement("button");
-      btn.textContent = "🧭 Look around with device";
-      btn.style.cssText = "position:absolute;top:64px;right:16px;z-index:3;background:rgba(0,0,0,.5);color:#fff;";
-      btn.addEventListener("click", () => {
-        const ok = instance.enableOrientation();
-        btn.remove();
-      });
-      host.parentElement.appendChild(btn);
+      buildSphereControls(host.parentElement, instance);
     } else if (manifest.renderer === "frames") {
       const urls = (manifest.frames || []).map(resolveUrl);
       if (urls.length === 0) {
@@ -94,6 +86,48 @@ const ScreenViewer = (() => {
       }
     } else {
       loadingText.textContent = `Unknown renderer "${manifest.renderer}".`;
+    }
+
+    // Wheel, pinch and keyboard already do all of this, but none of them are
+    // discoverable and none exist on a phone. The bar is the only way most
+    // people will find zoom, fullscreen or the gyroscope.
+    function buildSphereControls(parent, viewer) {
+      const bar = document.createElement("div");
+      bar.className = "viewer-tools";
+      const mk = (label, title, onClick, cls) => {
+        const b = document.createElement("button");
+        b.className = "viewer-tool" + (cls ? " " + cls : "");
+        b.type = "button";
+        b.textContent = label;
+        b.title = title;
+        b.setAttribute("aria-label", title);
+        b.addEventListener("click", (e) => { e.stopPropagation(); onClick(b); });
+        bar.appendChild(b);
+        return b;
+      };
+
+      mk("\u2212", "Zoom out", () => viewer.zoomOut());
+      mk("+", "Zoom in", () => viewer.zoomIn());
+      mk("\u21ba", "Reset the view", () => viewer.resetView());
+
+      const spin = mk("\u25cc", "Pause the slow drift", (b) => {
+        const on = viewer.setAutoRotate(!viewer.isAutoRotating());
+        b.classList.toggle("off", !on);
+        b.title = on ? "Pause the slow drift" : "Let the view drift again";
+      });
+      spin.classList.toggle("off", !viewer.isAutoRotating());
+
+      // Device orientation needs a user gesture on iOS, so it stays a button
+      // and disappears once granted - there is no turning it back off.
+      if (window.DeviceOrientationEvent) {
+        mk("\u{1F9ED}", "Look around by moving the phone", (b) => {
+          if (viewer.enableOrientation()) b.remove();
+        });
+      }
+      if (document.fullscreenEnabled) {
+        mk("\u26f6", "Fullscreen", () => viewer.toggleFullscreen());
+      }
+      parent.appendChild(bar);
     }
 
     function resolveUrl(u) {
