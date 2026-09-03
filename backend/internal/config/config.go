@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -29,6 +30,17 @@ func env(k, def string) string {
 	return def
 }
 
+// endpoint reads an S3 endpoint, which must be host[:port] rather than a URL.
+// minio-go quietly accepts a scheme while the worker's Python client rejects
+// it, so normalising here keeps both halves of the app agreeing on one value.
+func endpoint(k, def string) string {
+	v := env(k, def)
+	for _, scheme := range []string{"https://", "http://"} {
+		v = strings.TrimPrefix(v, scheme)
+	}
+	return strings.TrimSuffix(v, "/")
+}
+
 func envInt(k string, def int) int {
 	if v := os.Getenv(k); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -45,7 +57,7 @@ func Load() Config {
 		DatabaseURL:   env("DATABASE_URL", "postgres://orbit:orbit@localhost:5433/orbit?sslmode=disable"),
 		RedisAddr:     env("REDIS_ADDR", "localhost:6380"),
 		RedisURL:      env("REDIS_URL", ""),
-		MinIOEndpoint: env("MINIO_ENDPOINT", "localhost:9010"),
+		MinIOEndpoint: endpoint("MINIO_ENDPOINT", "localhost:9010"),
 		MinIOAccess:   env("MINIO_ACCESS_KEY", "orbitadmin"),
 		MinIOSecret:   env("MINIO_SECRET_KEY", "orbitadmin123"),
 		MinIOUseSSL:   env("MINIO_USE_SSL", "false") == "true",

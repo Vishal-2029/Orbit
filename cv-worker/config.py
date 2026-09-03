@@ -7,6 +7,20 @@ def _env(k, default):
     return v if v not in (None, "") else default
 
 
+def _endpoint(k, default):
+    """S3 endpoints are host[:port], never a URL.
+
+    Pasting the scheme in is the natural mistake, and the Go client tolerates it
+    while the Python one raises "path in endpoint is not allowed" at startup, so
+    the two halves of the app disagree about a working config. Strip it here.
+    """
+    v = _env(k, default)
+    for scheme in ("https://", "http://"):
+        if v.startswith(scheme):
+            v = v[len(scheme):]
+    return v.rstrip("/")
+
+
 def _envint(k, default):
     try:
         return int(_env(k, default))
@@ -26,7 +40,7 @@ class Settings:
     consumer_name = _env("CONSUMER_NAME", f"cv-worker-{os.getpid()}")
 
     # MinIO / S3
-    minio_endpoint = _env("MINIO_ENDPOINT", "localhost:9010")
+    minio_endpoint = _endpoint("MINIO_ENDPOINT", "localhost:9010")
     minio_access_key = _env("MINIO_ACCESS_KEY", "orbitadmin")
     minio_secret_key = _env("MINIO_SECRET_KEY", "orbitadmin123")
     minio_use_ssl = _env("MINIO_USE_SSL", "false") == "true"
