@@ -325,3 +325,157 @@ func (r *Repo) SetFrameCount(ctx context.Context, captureID string, n int) error
 		`UPDATE captures SET frame_count=$2, updated_at=now() WHERE id=$1`, captureID, n)
 	return err
 }
+
+// --------------------------------------------------------------------------
+// Hotspots
+// --------------------------------------------------------------------------
+
+const hotspotCols = `id, capture_id, kind, yaw, pitch, title, body,
+	target_capture_id, rotation, created_at, updated_at`
+
+func scanHotspot(row pgx.Row) (*domain.Hotspot, error) {
+	var h domain.Hotspot
+	var title, body, target *string
+	err := row.Scan(&h.ID, &h.CaptureID, &h.Kind, &h.Yaw, &h.Pitch,
+		&title, &body, &target, &h.Rotation, &h.CreatedAt, &h.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) || isBadUUID(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if title != nil {
+		h.Title = *title
+	}
+	if body != nil {
+		h.Body = *body
+	}
+	if target != nil {
+		h.TargetCaptureID = *target
+	}
+	return &h, nil
+}
+
+// nullable turns an empty string into a SQL NULL. The columns are nullable
+// because "an info hotspot has no target" is genuinely absent rather than
+// empty, and the CHECK constraints in the migration are written against NULL.
+func nullable(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func (r *Repo) CreateHotspot(ctx context.Context, h *domain.Hotspot) (*domain.Hotspot, error) {
+	row := r.pool.QueryRow(ctx, `
+		INSERT INTO hotspots (capture_id, kind, yaw, pitch, title, body, target_capture_id, rotation)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING `+hotspotCols,
+		h.CaptureID, h.Kind, h.Yaw, h.Pitch, nullable(h.Title), nullable(h.Body),
+		nullable(h.TargetCaptureID), h.Rotation)
+	return scanHotspot(row)
+}
+
+func (r *Repo) GetHotspot(ctx context.Context, id string) (*domain.Hotspot, error) {
+	return scanHotspot(r.pool.QueryRow(ctx,
+		`SELECT `+hotspotCols+` FROM hotspots WHERE id=$1`, id))
+}
+
+// ListHotspots returns one capture's hotspots, oldest first so the order a user
+// placed them in is the order they come back in.
+func (r *Repo) ListHotspots(ctx context.Context, captureID string) ([]domain.Hotspot, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+hotspotCols+`
+		FROM hotspots WHERE capture_id=$1 ORDER BY created_at`, captureID)
+	if err != nil {
+		if isBadUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Hotspot{}
+	for rows.Next() {
+		h, err := scanHotspot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *h)
+	}
+	return out, rows.Err()
+}
+
+// UpdateHotspot replaces the editable fields. Kind and capture_id are not among
+// them: changing either turns the hotspot into a different thing, and deleting
+// and re-creating is both clearer to read and easier to undo.
+func (r *Repo) UpdateHotspot(ctx context.Context, h *domain.Hotspot) (*domain.Hotspot, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE hotspots
+		SET yaw=$2, pitch=$3, title=$4, body=$5, target_capture_id=$6,
+		    rotation=$7, updated_at=now()
+		WHERE id=$1 RETURNING `+hotspotCols,
+		h.ID, h.Yaw, h.Pitch, nullable(h.Title), nullable(h.Body),
+		nullable(h.TargetCaptureID), h.Rotation)
+	return scanHotspot(row)
+}
+
+func (r *Repo) DeleteHotspot(ctx context.Context, id string) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM hotspots WHERE id=$1`, id)
+	if err != nil {
+		if isBadUUID(err) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LinkedCaptureIDs walks the link graph outward and returns every capture
+// reachable from this one, including the starting point.
+//
+// The viewer needs them all up front to build its scenes. A recursive CTE
+// rather than a loop of queries because a tour of a house is a dozen rooms
+// linking to each other, and doing that one round trip at a time against a
+// hosted database is the difference between a viewer that opens and one that
+// stutters.
+//
+// Depth is capped so a cycle in the data cannot walk forever, and because a
+// viewer that silently prepares eighty panoramas is its own kind of bug.
+func (r *Repo) LinkedCaptureIDs(ctx context.Context, captureID string, maxDepth int) ([]string, error) {
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
+	rows, err := r.pool.Query(ctx, `
+		WITH RECURSIVE reachable(id, depth) AS (
+			SELECT $1::uuid, 0
+			UNION
+			SELECT h.target_capture_id, r.depth + 1
+			FROM reachable r
+			JOIN hotspots h ON h.capture_id = r.id
+			WHERE h.target_capture_id IS NOT NULL AND r.depth < $2
+		)
+		SELECT DISTINCT reachable.id
+		FROM reachable
+		JOIN captures c ON c.id = reachable.id
+		-- Only scenes the viewer could actually render. A capture still
+		-- processing has no panorama, and an arrow leading to one would open a
+		-- black screen.
+		WHERE c.status IN ('ready', 'partial')`, captureID, maxDepth)
+	if err != nil {
+		if isBadUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
