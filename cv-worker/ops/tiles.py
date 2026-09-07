@@ -76,11 +76,27 @@ def face_size_for(equirect_width):
     return min(size, MAX_FACE_SIZE)
 
 
-def _face_directions(face, size):
-    """Unit vectors for the centre of every pixel of one cube face."""
+# Rows of a cube face rendered at a time.
+#
+# Building the projection for a whole face at once needs about a dozen float32
+# arrays the size of the face - the direction vectors, the radius, the two
+# angles, the two coordinate maps - which for a 1024 face is roughly 48MB of
+# temporaries. That lands on top of the panorama and the source photos, on a
+# 512MB instance, immediately after the stitch, which is already the high-water
+# mark of the whole worker.
+#
+# In strips the same arrays are a fraction of the size and the peak stops
+# depending on the face size at all. The output is identical: each row's
+# projection is independent of every other.
+FACE_STRIP_ROWS = 128
+
+
+def _strip_directions(face, size, y0, y1):
+    """Unit vectors for the pixel centres of rows [y0, y1) of one cube face."""
     # Pixel centres, spread across [-1, 1].
-    a = (np.arange(size, dtype=np.float32) + 0.5) * (2.0 / size) - 1.0
-    u, v = np.meshgrid(a, a)
+    cols = (np.arange(size, dtype=np.float32) + 0.5) * (2.0 / size) - 1.0
+    rows = (np.arange(y0, y1, dtype=np.float32) + 0.5) * (2.0 / size) - 1.0
+    u, v = np.meshgrid(cols, rows)
 
     # The front face looks along -Z. Screen right is +X; screen DOWN is -Y,
     # because +Y is up, hence the minus on v.
@@ -99,7 +115,7 @@ def _face_directions(face, size):
     return x, y, z
 
 
-def cube_face(equirect, face, size):
+def cube_face(equirect, face, size, strip_rows=FACE_STRIP_ROWS):
     """Render one cube face out of an equirectangular image.
 
     The mapping is the viewer's own, so that a tiled panorama and the equirect
@@ -107,22 +123,32 @@ def cube_face(equirect, face, size):
 
         theta = atan2(x, -z)        yaw, zero at the centre column
         phi   = acos(y / r)         angle from straight up, zero at the top row
+
+    Rendered in horizontal strips to bound the working set; see
+    FACE_STRIP_ROWS.
     """
     h, w = equirect.shape[:2]
-    x, y, z = _face_directions(face, size)
+    out = np.empty((size, size, equirect.shape[2]), dtype=equirect.dtype)
 
-    r = np.sqrt(x * x + y * y + z * z)
-    theta = np.arctan2(x, -z)
-    phi = np.arccos(np.clip(y / r, -1.0, 1.0))
+    for y0 in range(0, size, strip_rows):
+        y1 = min(y0 + strip_rows, size)
+        x, y, z = _strip_directions(face, size, y0, y1)
 
-    map_x = ((0.5 + 0.5 * theta / math.pi) * w).astype(np.float32)
-    map_y = ((phi / math.pi) * h).astype(np.float32)
+        r = np.sqrt(x * x + y * y + z * z)
+        theta = np.arctan2(x, -z)
+        phi = np.arccos(np.clip(y / r, -1.0, 1.0))
+        del x, z, r
 
-    # BORDER_WRAP horizontally is what makes the seam invisible on the faces
-    # that straddle it: a panorama is cyclic, so sampling past the right edge
-    # must come back in on the left.
-    return cv2.remap(equirect, map_x, map_y, cv2.INTER_LINEAR,
-                     borderMode=cv2.BORDER_WRAP)
+        map_x = ((0.5 + 0.5 * theta / math.pi) * w).astype(np.float32)
+        map_y = ((phi / math.pi) * h).astype(np.float32)
+        del theta, phi, y
+
+        # BORDER_WRAP horizontally is what makes the seam invisible on the faces
+        # that straddle it: a panorama is cyclic, so sampling past the right edge
+        # must come back in on the left.
+        out[y0:y1] = cv2.remap(equirect, map_x, map_y, cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_WRAP)
+    return out
 
 
 # The smallest level, which the viewer can draw immediately while the sharp

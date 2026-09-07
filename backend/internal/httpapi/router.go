@@ -377,13 +377,19 @@ func (s *Server) serveTile(c *fiber.Ctx) error {
 }
 
 func (s *Server) streamObject(c *fiber.Ctx, bucket, key string) error {
-	b, err := s.store.GetBytes(c.Context(), bucket, key)
+	// Streamed, not buffered. GetBytes pulls the whole object into memory
+	// first, and a panorama is several megabytes - so a handful of people
+	// opening share links at once held tens of megabytes of JPEG in the API,
+	// on an instance that shares its memory with the CV worker and was already
+	// being restarted for exceeding it. SendStream hands the body straight to
+	// the socket instead, and the reader is closed when the response is done.
+	rc, err := s.store.Get(c.Context(), bucket, key)
 	if err != nil {
 		return fiber.NewError(fiber.StatusNotFound, "image not found: "+key)
 	}
 	c.Set("Content-Type", "image/jpeg")
 	c.Set("Cache-Control", "public, max-age=31536000, immutable")
-	return c.Send(b)
+	return c.SendStream(rc)
 }
 
 // --- worker callbacks ---

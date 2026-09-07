@@ -212,3 +212,33 @@ MINIO_ACCESS_KEY / MINIO_SECRET_KEY   # currently orbitadmin / orbitadmin123
 POSTGRES_PASSWORD                      # currently orbit
 JWT_SECRET                             # currently dev-only-change-me
 ```
+
+## Memory
+
+The combined container runs the Go API and the Python CV worker side by side, so
+they share one limit. On Render's 512MB tier that is tight, and exceeding it
+restarts the instance mid-job — which costs the user their capture.
+
+Three things keep it inside the limit:
+
+**Images are streamed, not buffered.** Serving a panorama used to read the whole
+object into memory first. A panorama is several megabytes, so a spike of people
+opening share links held that many copies at once — thirty concurrent viewers of
+a 7.5MB panorama is 225MB of JPEG in the API alone. Measured after the change:
+the API stays at 23MB peak while serving ninety such requests.
+
+**The worker releases source photos as soon as it has a panorama.** Twelve
+normalised photos is over 120MB, and Python keeps a list alive to the end of its
+function, so they used to sit there through the clean-up, the encode, the upload
+and the tiling — all of which happen at the worker's high-water mark.
+
+**Cube tiles are skipped below 640MB.** They are a rendering optimisation; the
+viewer falls back to the equirectangular JPEG on its own. `GENERATE_TILES=true`
+forces them on, `false` off.
+
+The stitcher already sizes itself from the same cgroup limit — see
+`_auto_tile_budget_px` and `_auto_compositing_mp` in `cv-worker/config.py`.
+
+If you still see restarts, the next lever is the instance type. Stitching is
+inherently memory-hungry and 512MB shared with an API is the smallest anything
+will comfortably fit in.

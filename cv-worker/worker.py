@@ -5,6 +5,7 @@ Consumes Redis Stream "orbit:jobs" (consumer group "cv-workers"), processes
 capture.frame.process and capture.finalize jobs, and reports results back to
 the Go API via its internal HTTP callbacks. See README.md for details.
 """
+import gc
 import json
 import logging
 import os
@@ -354,6 +355,25 @@ def wait_for_frames(capture_id):
 
 
 
+def _release(images):
+    """Drop the decoded source photos once a stitch has produced a panorama.
+
+    They are the single largest thing the finalize job holds - twelve normalised
+    photos is over 120MB - and nothing after the stitch reads them. Python keeps
+    a list alive to the end of the enclosing function, so without this they sit
+    there through the clean-up, the JPEG encode, the upload and the tiling, all
+    of which happen at the worker's high-water mark. On a 512MB instance sharing
+    a container with the API, that margin is the difference between finishing
+    and being restarted by the platform.
+    """
+    freed = sum(im.nbytes for im in images) if images else 0
+    del images[:]
+    gc.collect()
+    if freed:
+        log.info("%s released %.0f MB of source photos before publishing",
+                 PREFIX, freed / (1024 * 1024))
+
+
 def _upload_tiles(mc, capture_id, pano):
     """Cut the panorama into cube tiles and store them.
 
@@ -530,6 +550,7 @@ def handle_finalize_job(mc, job):
                 hfov_deg=65.0, aspect=src_h / float(src_w))
             log.info("%s capture=%s covers %.0f%% of the sphere",
                      PREFIX, capture_id, coverage * 100)
+            _release(images)
             # Whatever comes of it, the capture has been reported on: either a
             # sphere was published or it was degraded to the frame viewer. Only
             # a stitch that never produced a picture falls through to the next
@@ -547,6 +568,7 @@ def handle_finalize_job(mc, job):
     # third of one.
     ok, pano, reason, geom, kept = stitch_with_features(images)
     if ok and pano is not None:
+        _release(images)
         _finish_and_publish(mc, capture_id, pano, geom, ring,
                             used=len(kept), total=total,
                             coverage_note=describe_leftovers(total, len(kept)))
@@ -567,6 +589,7 @@ def handle_finalize_job(mc, job):
         })
         return
 
+    _release(images)
     _finish_and_publish(mc, capture_id, fallback_pano, None, ring,
                         used=total, total=total)
 

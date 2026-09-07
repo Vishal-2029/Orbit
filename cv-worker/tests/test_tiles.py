@@ -210,12 +210,51 @@ def test_the_wrap_seam_does_not_show_on_a_face():
           diffs > 1.0, "near-zero means the edge was smeared, not wrapped")
 
 
+def test_strips_do_not_change_the_picture():
+    """Rendering a face in strips is a memory fix, not a visual one.
+
+    A face is built a few rows at a time so its working set stops depending on
+    the face size - about 48MB of float32 temporaries for a 1024 face, landing
+    right at the worker's high-water mark on an instance that shares its memory
+    with the API. Each row's projection is independent of every other, so the
+    result must be identical to rendering the whole face at once.
+    """
+    eq = _equirect_with_landmarks()
+    for face in T.FACES:
+        whole = T.cube_face(eq, face, 256, strip_rows=256)
+        strips = T.cube_face(eq, face, 256, strip_rows=64)
+        check("face %s is identical however it is strip-rendered" % face,
+              np.array_equal(whole, strips))
+
+
+def test_tiles_are_skipped_on_a_small_instance():
+    """Tiles are an optimisation, and the first thing to give up when memory is
+    the binding constraint. Being restarted mid-job costs the user their
+    capture; missing tiles costs them nothing they would notice."""
+    import config
+
+    original = config._cgroup_memory_limit_mb
+    try:
+        for limit, want in ((None, True), (512, False), (640, False),
+                            (768, True), (2048, True)):
+            config._cgroup_memory_limit_mb = lambda l=limit: l
+            got = config._auto_generate_tiles()
+            check("a %s host %s tiles" % (
+                      "%dMB" % limit if limit else "memory-unlimited",
+                      "cuts" if want else "skips"),
+                  got is want, "got %s" % got)
+    finally:
+        config._cgroup_memory_limit_mb = original
+
+
 if __name__ == "__main__":
     for fn in [test_faces_rebuild_the_panorama,
                test_landmarks_land_on_the_right_faces,
                test_the_pyramid_is_shaped_the_way_the_viewer_expects,
                test_cut_tiles_produces_every_tile_once,
-               test_the_wrap_seam_does_not_show_on_a_face]:
+               test_the_wrap_seam_does_not_show_on_a_face,
+               test_strips_do_not_change_the_picture,
+               test_tiles_are_skipped_on_a_small_instance]:
         print("\n%s:" % fn.__name__)
         fn()
     print("\n%d failure(s)" % len(FAILURES))

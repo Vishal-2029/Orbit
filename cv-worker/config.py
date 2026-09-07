@@ -62,6 +62,22 @@ def _auto_tile_budget_px():
     return max(12_000_000, (limit * 1024 * 1024 // 3) // 4)
 
 
+def _auto_generate_tiles():
+    """Whether to cut cube tiles, when nothing has said either way.
+
+    Tiles are a rendering optimisation, not a requirement - without them the
+    viewer falls back to the equirectangular JPEG and everything still works.
+    So on the smallest instances they are the first thing to give up: 512MB
+    shared with the Go API leaves very little margin after a stitch, and being
+    restarted mid-job costs the user their capture, while missing tiles costs
+    them nothing they would notice.
+
+    Set GENERATE_TILES explicitly to override in either direction.
+    """
+    limit = _cgroup_memory_limit_mb()
+    return limit is None or limit > 640
+
+
 def _auto_compositing_mp():
     """Cap the stitch on a small instance; leave full resolution on a big one.
 
@@ -111,10 +127,14 @@ class Settings:
     # video memory held open. Tiles are fetched only where the viewer is
     # looking, at the resolution it needs.
     #
-    # The cost is roughly thirty extra objects per capture. Turn it off on a
-    # host where object count or storage is the binding constraint - the viewer
-    # falls back to the equirect on its own.
-    generate_tiles = _env("GENERATE_TILES", "true").lower() not in ("0", "false", "no")
+    # The cost is eighteen extra objects per capture and a modest amount of
+    # memory at the worker's high-water mark, so it is skipped automatically on
+    # a small instance - see _auto_generate_tiles. Setting GENERATE_TILES
+    # overrides that in either direction.
+    generate_tiles = (
+        _env("GENERATE_TILES", "").lower() not in ("0", "false", "no")
+        if _env("GENERATE_TILES", "") else _auto_generate_tiles()
+    )
 
     # Megapixels the stitcher composites at. OpenCV's default is the input
     # resolution, which is by far the worker's largest allocation: +171 MiB over
