@@ -26,7 +26,8 @@ services:
     entrypoint: ["sh", "-c"]
     command: >-
       psql -h postgres -U orbit -d orbit -f /migrations/001_init.sql &&
-      psql -h postgres -U orbit -d orbit -f /migrations/002_quaternion.sql
+      psql -h postgres -U orbit -d orbit -f /migrations/002_quaternion.sql &&
+      psql -h postgres -U orbit -d orbit -f /migrations/003_hotspots.sql
 
   minio:
     image: minio/minio:latest

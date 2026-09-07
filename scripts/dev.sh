@@ -10,7 +10,11 @@ say() { printf "\033[36m==>\033[0m %s\n" "$*"; }
 say "Starting infra (Postgres, MinIO, Redis)..."
 docker compose up -d >/dev/null
 until docker exec orbit-postgres pg_isready -U orbit >/dev/null 2>&1; do sleep 1; done
-docker exec -i orbit-postgres psql -U orbit -d orbit -q < backend/migrations/001_init.sql
+# Every migration, in order. Listing them one by one meant each new one had
+# to be remembered here, and 002 was already missing.
+for m in backend/migrations/*.sql; do
+  docker exec -i orbit-postgres psql -U orbit -d orbit -q < "$m"
+done
 say "Infra ready."
 
 cleanup() {
