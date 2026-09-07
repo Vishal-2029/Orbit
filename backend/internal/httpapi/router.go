@@ -63,7 +63,16 @@ func NewServer(svc *service.Capture, hub *realtime.Hub, store storage.Store, cfg
 	v1.Get("/captures/:id/frames", s.listFrames)
 	v1.Get("/captures/:id/manifest", s.getManifest)
 	v1.Get("/captures/:id/image/panorama", s.servePanorama)
+	v1.Get("/captures/:id/tiles/:z/:f/:y/:x.jpg", s.serveTile)
 	v1.Get("/captures/:id/image/:kind/:idx", s.serveImage)
+
+	// Hotspots. Creating and listing hang off the capture they belong to;
+	// updating and deleting address the hotspot directly, because by then the
+	// client already has its id and the parent is implied.
+	v1.Get("/captures/:id/hotspots", s.listHotspots)
+	v1.Post("/captures/:id/hotspots", s.createHotspot)
+	v1.Patch("/hotspots/:hotspotId", s.updateHotspot)
+	v1.Delete("/hotspots/:hotspotId", s.deleteHotspot)
 
 	// Internal callbacks used by the CV worker.
 	w := v1.Group("/internal")
@@ -118,6 +127,12 @@ func errorHandler(c *fiber.Ctx, err error) error {
 	}
 	if errors.Is(err, repo.ErrNotFound) {
 		code = fiber.StatusNotFound
+	}
+	// A ValidationError is a problem with what was sent, not with the server.
+	// Without this it would surface as a 500 and read like a crash.
+	var ve *service.ValidationError
+	if errors.As(err, &ve) {
+		code = fiber.StatusBadRequest
 	}
 	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
 }
@@ -284,8 +299,24 @@ func (s *Server) getManifest(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict,
 			"this 360 view is not ready yet (status: "+cap.Status+")")
 	}
+	return s.sendManifest(c, cap)
+}
+
+// sendManifest writes a manifest with its hotspots and tour attached.
+//
+// The stored manifest is written once, when the stitch finishes. Hotspots are
+// placed long afterwards, so they are joined on here rather than baked in -
+// otherwise every edit would need the manifest rewritten, and any that was
+// missed would leave the viewer showing markers that are no longer there.
+func (s *Server) sendManifest(c *fiber.Ctx, cap *domain.Capture) error {
+	body, err := s.svc.ManifestWithScenes(c.Context(), cap)
+	if err != nil {
+		// Hotspots are an addition to a view that already worked. If assembling
+		// them fails, show the panorama without them rather than nothing.
+		body = cap.Manifest
+	}
 	c.Set("Content-Type", "application/json")
-	return c.Send(cap.Manifest)
+	return c.Send(body)
 }
 
 func (s *Server) manifestBySlug(c *fiber.Ctx) error {
@@ -299,8 +330,7 @@ func (s *Server) manifestBySlug(c *fiber.Ctx) error {
 	if len(cap.Manifest) == 0 {
 		return fiber.NewError(fiber.StatusConflict, "not ready yet (status: "+cap.Status+")")
 	}
-	c.Set("Content-Type", "application/json")
-	return c.Send(cap.Manifest)
+	return s.sendManifest(c, cap)
 }
 
 func (s *Server) serveImage(c *fiber.Ctx) error {
@@ -325,6 +355,25 @@ func (s *Server) serveImage(c *fiber.Ctx) error {
 
 func (s *Server) servePanorama(c *fiber.Ctx) error {
 	return s.streamObject(c, s.cfg.BucketPublic, storage.PanoramaKey(c.Params("id")))
+}
+
+// serveTile hands back one cube tile.
+//
+// The parameters go straight into an object key, so they are parsed rather than
+// interpolated: z, x and y must be numbers and the face must be one of the six
+// letters. Without that, a crafted path could reach for any object in the
+// bucket.
+func (s *Server) serveTile(c *fiber.Ctx) error {
+	z, errZ := strconv.Atoi(c.Params("z"))
+	y, errY := strconv.Atoi(c.Params("y"))
+	x, errX := strconv.Atoi(strings.TrimSuffix(c.Params("x.jpg"), ".jpg"))
+	face := c.Params("f")
+	if errZ != nil || errY != nil || errX != nil ||
+		z < 0 || x < 0 || y < 0 || len(face) != 1 || !strings.Contains("fudlrb", face) {
+		return fiber.NewError(fiber.StatusBadRequest, "bad tile coordinates")
+	}
+	return s.streamObject(c, s.cfg.BucketPublic,
+		storage.TileKey(c.Params("id"), z, face, x, y))
 }
 
 func (s *Server) streamObject(c *fiber.Ctx, bucket, key string) error {
@@ -437,4 +486,52 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// --------------------------------------------------------------------------
+// Hotspots
+// --------------------------------------------------------------------------
+
+func (s *Server) listHotspots(c *fiber.Ctx) error {
+	// Going through the capture first means a bad id gives 404 rather than an
+	// empty list, which would otherwise look like "this capture has none".
+	if _, err := s.svc.Get(c.Context(), c.Params("id")); err != nil {
+		return err
+	}
+	hs, err := s.svc.ListHotspots(c.Context(), c.Params("id"))
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"hotspots": hs})
+}
+
+func (s *Server) createHotspot(c *fiber.Ctx) error {
+	var in service.HotspotInput
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
+	}
+	h, err := s.svc.CreateHotspot(c.Context(), c.Params("id"), in)
+	if err != nil {
+		return err
+	}
+	return c.Status(fiber.StatusCreated).JSON(h)
+}
+
+func (s *Server) updateHotspot(c *fiber.Ctx) error {
+	var in service.HotspotInput
+	if err := c.BodyParser(&in); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
+	}
+	h, err := s.svc.UpdateHotspot(c.Context(), c.Params("hotspotId"), in)
+	if err != nil {
+		return err
+	}
+	return c.JSON(h)
+}
+
+func (s *Server) deleteHotspot(c *fiber.Ctx) error {
+	if err := s.svc.DeleteHotspot(c.Context(), c.Params("hotspotId")); err != nil {
+		return err
+	}
+	return c.SendStatus(fiber.StatusNoContent)
 }
