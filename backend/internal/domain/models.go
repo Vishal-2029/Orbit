@@ -121,6 +121,83 @@ type Frame struct {
 	Error             *string `json:"error,omitempty"`
 }
 
+
+// HotspotKind is which of the two things a hotspot is.
+const (
+	HotspotInfo = "info"
+	HotspotLink = "link"
+)
+
+// Hotspot is a marker placed inside a finished 360.
+//
+// Yaw and Pitch are RADIANS, unlike Frame.Yaw which is a compass bearing in
+// degrees. They are different quantities - where a marker sits, versus where
+// the phone was pointed - and the viewer's projection maths speaks radians, so
+// converting at the edges would only move the rounding around.
+//
+// Pitch is positive DOWNWARDS, which is the viewer's convention and therefore
+// the one these numbers arrive in: a click at the top of the screen comes back
+// negative. Worth stating, because it is the opposite of Frame.Pitch.
+type Hotspot struct {
+	ID        string  `json:"id"`
+	CaptureID string  `json:"capture_id"`
+	Kind      string  `json:"kind"` // "info" | "link"
+	Yaw       float64 `json:"yaw"`
+	Pitch     float64 `json:"pitch"`
+
+	// info
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
+
+	// link
+	TargetCaptureID string  `json:"target_capture_id,omitempty"`
+	Rotation        float64 `json:"rotation,omitempty"`
+
+	// TargetTitle and TargetSlug are filled in when a manifest is built, so the
+	// viewer can label an arrow and route to it without fetching every
+	// neighbouring capture first.
+	TargetTitle string `json:"target_title,omitempty"`
+	TargetSlug  string `json:"target_slug,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Scene is one panorama inside a manifest.
+//
+// A capture used to be a single panorama and the manifest described it
+// directly. Link hotspots make a capture the entry point to a small graph of
+// them, and the viewer needs every reachable panorama up front: the panorama
+// engine only downloads tiles for the scene on screen, so building them all is
+// cheap, and having them built is what lets a link cross-fade instead of
+// reloading the page.
+type Scene struct {
+	ID       string `json:"id"`
+	Slug     string `json:"slug,omitempty"`
+	Title    string `json:"title"`
+	Panorama string `json:"panorama"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+
+	// Tiles is a URL template with {z}/{f}/{y}/{x} placeholders, present only
+	// when the worker produced a cube-tile pyramid for this capture. When it is
+	// empty the viewer falls back to the single equirectangular image, which
+	// works everywhere but cannot stay sharp when zoomed.
+	Tiles   string       `json:"tiles,omitempty"`
+	Preview string       `json:"preview,omitempty"`
+	Levels  []TileLevel  `json:"levels,omitempty"`
+
+	Hotspots []Hotspot `json:"hotspots"`
+}
+
+// TileLevel is one step of the cube-tile pyramid, in the shape the panorama
+// engine's CubeGeometry expects.
+type TileLevel struct {
+	TileSize     int  `json:"tileSize"`
+	Size         int  `json:"size"`
+	FallbackOnly bool `json:"fallbackOnly,omitempty"`
+}
+
 // Manifest is what the viewer downloads. It is deliberately self-contained:
 // the viewer needs no other API call to render.
 type Manifest struct {
@@ -146,4 +223,20 @@ type Manifest struct {
 	Coverage    float64 `json:"coverage,omitempty"`
 	Degraded    bool    `json:"degraded"` // true when stitch failed and we fell back
 	DegradedWhy string  `json:"degraded_why,omitempty"`
+
+	// Hotspots on THIS capture. Kept alongside Scenes rather than only inside
+	// it so a client that predates scenes still finds them.
+	Hotspots []Hotspot `json:"hotspots,omitempty"`
+
+	// Scenes is this capture plus every other one reachable from it through a
+	// link hotspot, so the viewer can walk a tour without another round trip.
+	// The first entry is always this capture.
+	Scenes []Scene `json:"scenes,omitempty"`
+
+	// Tiles, Preview and Levels describe the cube-tile pyramid for THIS
+	// capture, when one exists. Same fields as Scene, repeated here for the
+	// same backwards-compatibility reason as Hotspots.
+	Tiles   string      `json:"tiles,omitempty"`
+	Preview string      `json:"preview,omitempty"`
+	Levels  []TileLevel `json:"levels,omitempty"`
 }
