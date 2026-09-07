@@ -85,6 +85,19 @@ const OrbitAPI = (() => {
     manifestBySlug(slug) {
       return req("GET", `/s/${slug}/manifest`);
     },
+
+    listHotspots(captureId) {
+      return req("GET", `/api/v1/captures/${captureId}/hotspots`);
+    },
+    createHotspot(captureId, hotspot) {
+      return req("POST", `/api/v1/captures/${captureId}/hotspots`, hotspot);
+    },
+    updateHotspot(hotspotId, patch) {
+      return req("PATCH", `/api/v1/hotspots/${hotspotId}`, patch);
+    },
+    deleteHotspot(hotspotId) {
+      return req("DELETE", `/api/v1/hotspots/${hotspotId}`);
+    },
     imageURL(id, kind, idx) {
       return `${base()}/api/v1/captures/${id}/image/${kind}/${idx}`;
     },

@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>Orbit — 360 Capture</title>
 <link rel="stylesheet" href="styles.css" />
+<!-- The panorama engine is vendored rather than pulled from a CDN: the viewer
+     is the one part of this app that must work on a phone with a poor
+     connection, and it is what every share link loads. Rebuild it with
+     scripts/build-pano-engine.sh. -->
+<script defer src="vendor/pano-engine.js"></script>
+<!-- three.js only backs the superseded sphere viewer, kept for one release
+     behind window.ORBIT_VIEWER="three". Deleting that file removes this too. -->
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
@@ -14,11 +21,14 @@
 <script src="api.js"></script>
 <script src="orientation.js"></script>
 <script src="sphere-math.js"></script>
+<script src="hotspots.js"></script>
 <script src="screens/home.js"></script>
 <script src="screens/capture.js"></script>
 <script src="screens/processing.js"></script>
 <script src="screens/viewer-sphere.js"></script>
+<script src="screens/viewer-sphere-three.js"></script>
 <script src="screens/viewer-frames.js"></script>
+<script src="screens/hotspot-editor.js"></script>
 <script src="screens/viewer.js"></script>
 <script src="router.js"></script>
 </body>

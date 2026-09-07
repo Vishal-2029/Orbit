@@ -1,308 +1,423 @@
-// Equirectangular panorama viewer on an inverted three.js sphere.
+// Equirectangular panorama viewer, on OrbitPano.
 //
-// Drag to look, wheel or pinch to zoom, double-click to zoom in, arrow keys to
-// pan, F for fullscreen. Movement carries momentum and settles, and the view
-// drifts on its own once you stop touching it, because a panorama that sits
-// perfectly still reads as a flat photo rather than somewhere you are standing.
+// This replaced a hand-written three.js sphere. The sphere itself was never the
+// problem - it worked - but everything we wanted to build on top of it needs two
+// pieces of maths the engine already has and three.js does not:
+//
+//   view.coordinatesToScreen({yaw, pitch})  ->  where to draw a marker
+//   view.screenToCoordinates({x, y})        ->  what the user just clicked on
+//
+// The second one IS the hotspot editor. Without it, placing a marker by clicking
+// means writing sphere raycasting by hand, and then writing it again the first
+// time the projection changes.
+//
+// The engine also reads a plain equirectangular JPEG, so the panorama the worker
+// already produces drops straight in with no tiling pipeline. When
+// manifest.tiles is present it uses cube tiles instead, which stay sharp when
+// zoomed - see CubeGeometry below.
+//
+// The old viewer is still in viewer-sphere-three.js behind window.ORBIT_VIEWER.
 const SphereViewer = (() => {
-  // Look angles are held in degrees and smoothed toward a target every frame,
-  // rather than being written straight from the pointer. That one indirection
-  // is what makes dragging feel weighted instead of glued to the cursor.
-  const DAMPING = 0.12;          // 0 = never arrives, 1 = no smoothing at all
-  const DRAG_SPEED = 0.13;       // degrees per pixel dragged
-  const FLICK_DECAY = 0.94;      // how quickly a flick runs out
-  const MIN_FOV = 25, MAX_FOV = 100, START_FOV = 75;
+  "use strict";
+
+  const DEG = Math.PI / 180;
+
+  // Field of view, in radians. The engine thinks in radians throughout and so
+  // does the hotspot data, so nothing here converts back and forth.
+  const MIN_FOV = 25 * DEG;
+  const MAX_FOV = 110 * DEG;
+  const START_FOV = 75 * DEG;
+  const ZOOM_STEP = 12 * DEG;
+
+  // A panorama that sits perfectly still reads as a flat photo rather than
+  // somewhere you are standing, so it drifts once you stop touching it.
   const IDLE_BEFORE_DRIFT_MS = 4000;
-  const DRIFT_DEG_PER_SEC = 1.8;
-  const MAX_PIXEL_RATIO = 2;     // 3x on a phone costs a lot and shows nothing
+  const DRIFT_RAD_PER_SEC = 1.8 * DEG;
 
-  function create(host, panoramaUrl, onLoadProgress, opts) {
+  /**
+   * host      element to fill
+   * scenes    [{ id, title, panorama, tiles, faceSize, initialView, hotspots }]
+   * opts      { onProgress, onSceneChange, onHotspotClick, startSceneId,
+   *             autoRotate, editable, onPlace }
+   */
+  function create(host, scenes, opts) {
     const options = opts || {};
-    const width = () => host.clientWidth || 1;
-    const height = () => host.clientHeight || 1;
+    const onProgress = options.onProgress || function () {};
+    // Not read from options each time: edit mode is toggled long after the
+    // viewer is built, and the hotspot elements are rebuilt when it changes.
+    let editable = !!options.editable;
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(START_FOV, width() / height(), 0.1, 1100);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    // A phone reporting devicePixelRatio 3 renders nine times the pixels of a
-    // CSS-pixel buffer for no visible gain on a photographic texture.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
-    renderer.setSize(width(), height());
-    // Without this the panorama renders noticeably flat and washed out: the
-    // JPEG is sRGB, and three.js assumes linear unless told otherwise.
-    if (THREE.sRGBEncoding !== undefined) renderer.outputEncoding = THREE.sRGBEncoding;
-    host.appendChild(renderer.domElement);
-
-    // More segments than the usual 60x40. The seam down the back of a sphere is
-    // where straight lines bend most, and the extra geometry is free next to
-    // the cost of the texture.
-    const geometry = new THREE.SphereGeometry(500, 96, 64);
-    geometry.scale(-1, 1, 1); // invert so the texture renders on the inside
-
-    let mesh = null;
-    let texture = null;
-
-    // A GPU refuses a texture wider than MAX_TEXTURE_SIZE and the panorama
-    // simply never appears - black sphere, no error. Older phones report 4096,
-    // which a finished panorama can exceed, so downscale rather than fail.
-    function fitToGPU(image) {
-      const max = renderer.capabilities.maxTextureSize || 4096;
-      if (image.width <= max && image.height <= max) return image;
-      const scale = max / Math.max(image.width, image.height);
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.floor(image.width * scale));
-      canvas.height = Math.max(1, Math.floor(image.height * scale));
-      canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
-      return canvas;
+    if (typeof OrbitPano === "undefined") {
+      onProgress(-1, new Error("The 360 viewer failed to load."));
+      return null;
+    }
+    if (!scenes || !scenes.length) {
+      onProgress(-1, new Error("There is nothing to show."));
+      return null;
     }
 
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin("anonymous");
-    loader.load(
-      panoramaUrl,
-      (tex) => {
-        tex.image = fitToGPU(tex.image);
-        if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
-        // Anisotropy is what keeps the ceiling and floor legible: they are the
-        // parts of an equirectangular image viewed at the sharpest angle, and
-        // without it they smear as soon as you look up.
-        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
-        tex.generateMipmaps = true;
-        tex.needsUpdate = true;
-        texture = tex;
-        mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: tex }));
-        scene.add(mesh);
-        onLoadProgress && onLoadProgress(1);
-      },
-      (xhr) => { if (xhr.total) onLoadProgress && onLoadProgress(xhr.loaded / xhr.total); },
-      (err) => { onLoadProgress && onLoadProgress(-1, err); }
-    );
+    const viewer = new OrbitPano.Viewer(host, {
+      controls: { mouseViewMode: "drag" },
+      // The engine puts its own hotspot layer inside this element, so it has to
+      // be the positioned ancestor everything else measures against.
+      stage: { preserveDrawingBuffer: false },
+    });
 
-    // Where the camera is looking, and where it is heading.
-    let lon = 0, lat = 0;
-    let targetLon = 0, targetLat = 0;
-    let fov = START_FOV, targetFov = START_FOV;
-    let spinVelocity = 0;                  // degrees per frame, left over from a flick
-    let dragging = false, lastX = 0, lastY = 0, moved = false;
-    let lastInteraction = performance.now();
+    // Zoom is capped by the source resolution as well as by taste: letting
+    // someone zoom past the pixels just shows them the blur.
+    function limiterFor(scene) {
+      const maxRes = scene.tiles ? (scene.faceSize || 4096) : 4096;
+      return OrbitPano.util.compose(
+        OrbitPano.RectilinearView.limit.vfov(MIN_FOV, MAX_FOV),
+        OrbitPano.RectilinearView.limit.hfov(MIN_FOV, MAX_FOV),
+        OrbitPano.RectilinearView.limit.pitch(-Math.PI / 2, Math.PI / 2),
+        OrbitPano.RectilinearView.limit.resolution(maxRes)
+      );
+    }
+
+    function geometryFor(scene) {
+      if (scene.tiles) {
+        // Multi-resolution cube faces. levels come from the manifest so the
+        // viewer never has to guess what the worker produced.
+        return new OrbitPano.CubeGeometry(scene.levels);
+      }
+      // A single equirectangular image. width is what the engine uses to decide
+      // when it has enough pixels, not a promise about the file.
+      return new OrbitPano.EquirectGeometry([{ width: scene.width || 4096 }]);
+    }
+
+    function sourceFor(scene) {
+      if (scene.tiles) {
+        return OrbitPano.ImageUrlSource.fromString(scene.tiles, {
+          cubeMapPreviewUrl: scene.preview || undefined,
+        });
+      }
+      return OrbitPano.ImageUrlSource.fromString(scene.panorama);
+    }
+
+    // ----------------------------------------------------------------------
+    // Build every scene up front.
+    //
+    // The engine only downloads tiles for the scene it is showing, so this is
+    // cheap, and having them ready is what lets a link hotspot cross-fade
+    // instead of tearing the viewer down and rebuilding it.
+    // ----------------------------------------------------------------------
+    const built = scenes.map((s) => {
+      const view = new OrbitPano.RectilinearView(
+        {
+          yaw: (s.initialView && s.initialView.yaw) || 0,
+          pitch: (s.initialView && s.initialView.pitch) || 0,
+          fov: (s.initialView && s.initialView.fov) || START_FOV,
+        },
+        limiterFor(s)
+      );
+      const scene = viewer.createScene({
+        source: sourceFor(s),
+        geometry: geometryFor(s),
+        view: view,
+        pinFirstLevel: true,
+      });
+      return { data: s, scene: scene, view: view, hotspots: [] };
+    });
+
+    const byId = {};
+    built.forEach((b) => (byId[b.data.id] = b));
+
+    let current = (options.startSceneId && byId[options.startSceneId]) || built[0];
+
+    // ----------------------------------------------------------------------
+    // Hotspots
+    // ----------------------------------------------------------------------
+    function attachHotspots(entry) {
+      // The engine positions whatever DOM element we hand it, every frame, and
+      // hides it when it goes behind the camera. All we supply is the markup.
+      (entry.data.hotspots || []).forEach((h) => {
+        const el = Hotspots.createElement(h, {
+          onActivate: () => {
+            if (h.kind === "link") {
+              switchTo(h.target_scene_id || h.target_capture_id);
+            }
+            options.onHotspotClick && options.onHotspotClick(h);
+          },
+          editable: editable,
+          onEdit: options.onEdit,
+          onDelete: options.onDelete,
+        });
+        entry.scene.hotspotContainer().createHotspot(el, {
+          yaw: h.yaw,
+          pitch: h.pitch,
+        });
+        entry.hotspots.push({ data: h, element: el });
+      });
+    }
+    built.forEach(attachHotspots);
+
+    function reloadHotspots(sceneId, hotspots) {
+      const entry = byId[sceneId];
+      if (!entry) return;
+      const container = entry.scene.hotspotContainer();
+      container.listHotspots().forEach((hs) => container.destroyHotspot(hs));
+      entry.hotspots.length = 0;
+      entry.data.hotspots = hotspots || [];
+      attachHotspots(entry);
+    }
+
+    // ----------------------------------------------------------------------
+    // Autorotate, paused while the user is doing anything
+    // ----------------------------------------------------------------------
+    const autorotate = OrbitPano.autorotate({
+      yawSpeed: DRIFT_RAD_PER_SEC,
+      targetPitch: 0,
+      targetFov: START_FOV,
+    });
     let autoRotate = options.autoRotate !== false;
+    let lastInteraction = performance.now();
 
     function touched() {
       lastInteraction = performance.now();
+      viewer.stopMovement();
+      viewer.setIdleMovement(IDLE_BEFORE_DRIFT_MS, autoRotate ? autorotate : null);
+    }
+    if (autoRotate) {
+      viewer.setIdleMovement(IDLE_BEFORE_DRIFT_MS, autorotate);
     }
 
-    function setTargetLat(v) {
-      // Stop just short of the poles: an equirectangular projection has no
-      // detail there, and looking straight up flips the horizon over.
-      targetLat = Math.max(-85, Math.min(85, v));
-    }
-
-    function onPointerDown(x, y) {
-      dragging = true; moved = false; lastX = x; lastY = y;
-      spinVelocity = 0;
-      touched();
-    }
-    function onPointerMove(x, y) {
-      if (!dragging) return;
-      const dx = x - lastX, dy = y - lastY;
-      if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
-      // Zoomed in, the same drag should cover less of the world - otherwise
-      // close inspection becomes impossible because everything flies past.
-      const speed = DRAG_SPEED * (fov / START_FOV);
-      targetLon -= dx * speed;
-      setTargetLat(targetLat + dy * speed);
-      spinVelocity = -dx * speed;
-      lastX = x; lastY = y;
-      touched();
-    }
-    function onPointerUp() { dragging = false; touched(); }
-
-    const dom = renderer.domElement;
-    dom.style.touchAction = "none";
-    dom.tabIndex = 0;   // so the canvas can take keyboard focus
-
-    const onMouseDown = (e) => { onPointerDown(e.clientX, e.clientY); dom.focus(); };
-    const onMouseMove = (e) => onPointerMove(e.clientX, e.clientY);
-    const onMouseUp = () => onPointerUp();
-    dom.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-
-    let pinchDist = null;
-    const onTouchStart = (e) => {
-      if (e.touches.length === 1) onPointerDown(e.touches[0].clientX, e.touches[0].clientY);
-      else if (e.touches.length === 2) { pinchDist = touchDist(e.touches); dragging = false; }
-    };
-    const onTouchMove = (e) => {
-      if (e.touches.length === 1) onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
-      else if (e.touches.length === 2) {
-        const d = touchDist(e.touches);
-        if (pinchDist) zoomBy((pinchDist - d) * 0.12);
-        pinchDist = d;
-        touched();
+    // ----------------------------------------------------------------------
+    // Loading progress
+    //
+    // There is no byte-level progress for a single equirect, so this reports the
+    // two states the engine does know: the first level is in, or it timed out.
+    // ----------------------------------------------------------------------
+    let readyReported = false;
+    function reportWhenReady() {
+      const stage = viewer.stage();
+      function onRender(stable) {
+        // renderComplete carries a flag saying whether every visible tile was
+        // ready. Waiting for it is what stops the loader clearing over a
+        // half-drawn sphere.
+        if (!stable || readyReported) return;
+        readyReported = true;
+        stage.removeEventListener("renderComplete", onRender);
+        onProgress(1);
       }
-    };
-    const onTouchEnd = () => { dragging = false; pinchDist = null; touched(); };
-    dom.addEventListener("touchstart", onTouchStart, { passive: true });
-    dom.addEventListener("touchmove", onTouchMove, { passive: true });
-    dom.addEventListener("touchend", onTouchEnd);
-
-    const onWheel = (e) => { e.preventDefault(); zoomBy(e.deltaY * 0.05); touched(); };
-    dom.addEventListener("wheel", onWheel, { passive: false });
-
-    // Double-click zooms toward what you clicked, the way a map does.
-    const onDblClick = (e) => {
-      if (moved) return;
-      zoomBy(targetFov > MIN_FOV + 12 ? -22 : 22);
-      touched();
-      e.preventDefault();
-    };
-    dom.addEventListener("dblclick", onDblClick);
-
-    const onKeyDown = (e) => {
-      const step = fov / 8;
-      switch (e.key) {
-        case "ArrowLeft":  targetLon -= step; break;
-        case "ArrowRight": targetLon += step; break;
-        case "ArrowUp":    setTargetLat(targetLat + step); break;
-        case "ArrowDown":  setTargetLat(targetLat - step); break;
-        case "+": case "=": zoomBy(-10); break;
-        case "-": case "_": zoomBy(10); break;
-        case "f": case "F": toggleFullscreen(); break;
-        default: return;
-      }
-      e.preventDefault();
-      touched();
-    };
-    dom.addEventListener("keydown", onKeyDown);
-
-    function touchDist(touches) {
-      const dx = touches[0].clientX - touches[1].clientX;
-      const dy = touches[0].clientY - touches[1].clientY;
-      return Math.hypot(dx, dy);
+      stage.addEventListener("renderComplete", onRender);
+      // A panorama that will not load must not leave a spinner up forever.
+      setTimeout(() => {
+        if (readyReported) return;
+        readyReported = true;
+        stage.removeEventListener("renderComplete", onRender);
+        onProgress(1);
+      }, 15000);
     }
-    function zoomBy(delta) {
-      targetFov = Math.max(MIN_FOV, Math.min(MAX_FOV, targetFov + delta));
+
+    current.scene.switchTo({ transitionDuration: 0 });
+    reportWhenReady();
+    options.onSceneChange && options.onSceneChange(current.data);
+
+    // ----------------------------------------------------------------------
+    // Scene switching
+    // ----------------------------------------------------------------------
+    function switchTo(sceneId, transitionMs) {
+      const next = byId[sceneId];
+      if (!next || next === current) return false;
+      current = next;
+      next.scene.switchTo({
+        transitionDuration: transitionMs == null ? 700 : transitionMs,
+      });
+      touched();
+      options.onSceneChange && options.onSceneChange(next.data);
+      return true;
+    }
+
+    // ----------------------------------------------------------------------
+    // Placing a hotspot: the click-to-coordinates half of the editor
+    // ----------------------------------------------------------------------
+    // A click here means "put a hotspot there", so it has to be told apart
+    // from a drag - otherwise every time the user looks around they drop a
+    // marker. Track where the pointer went down and only count it if it barely
+    // moved.
+    const CLICK_SLOP_PX = 6;
+    let downX = 0, downY = 0, downAt = 0;
+
+    function onPointerDown(ev) {
+      downX = ev.clientX;
+      downY = ev.clientY;
+      downAt = performance.now();
+    }
+
+    function onPointerUp(ev) {
+      if (!editable || !options.onPlace) return;
+      // Let a hotspot's own click handler have it.
+      if (ev.target.closest && ev.target.closest(".hotspot")) return;
+      const moved = Math.hypot(ev.clientX - downX, ev.clientY - downY);
+      if (moved > CLICK_SLOP_PX || performance.now() - downAt > 700) return;
+
+      const rect = host.getBoundingClientRect();
+      const coords = current.view.screenToCoordinates({
+        x: ev.clientX - rect.left,
+        y: ev.clientY - rect.top,
+      });
+      options.onPlace({
+        sceneId: current.data.id,
+        yaw: coords.yaw,
+        pitch: coords.pitch,
+      });
+    }
+    host.addEventListener("pointerdown", onPointerDown);
+    host.addEventListener("pointerup", onPointerUp);
+
+    // ----------------------------------------------------------------------
+    // Device orientation
+    // ----------------------------------------------------------------------
+    let orientationMethod = null;
+    let orientationActive = false;
+
+    function enableOrientation() {
+      if (orientationActive) return true;
+      const start = () => {
+        const controls = viewer.controls();
+        orientationMethod = new DeviceOrientationControl(current.view);
+        controls.registerMethod("deviceOrientation", orientationMethod);
+        controls.enableMethod("deviceOrientation");
+        orientationActive = true;
+        setAutoRotate(false);
+      };
+      if (typeof DeviceOrientationEvent !== "undefined" &&
+          typeof DeviceOrientationEvent.requestPermission === "function") {
+        DeviceOrientationEvent.requestPermission()
+          .then((res) => { if (res === "granted") start(); })
+          .catch(() => {});
+        // iOS answers asynchronously, so the caller cannot be told yet.
+        return false;
+      }
+      if (window.DeviceOrientationEvent) {
+        start();
+        return true;
+      }
+      return false;
     }
 
     function toggleFullscreen() {
       const el = host.parentElement || host;
-      if (document.fullscreenElement) document.exitFullscreen && document.exitFullscreen();
-      else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+      if (document.fullscreenElement) {
+        document.exitFullscreen && document.exitFullscreen();
+      } else if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => {});
+      }
     }
 
-    // Optional device-orientation look-around.
-    let orientationActive = false;
-    let baseAlpha = null;
-    function orientationHandler(ev) {
-      if (ev.alpha == null) return;
-      if (baseAlpha == null) baseAlpha = ev.alpha;
-      targetLon = -(ev.alpha - baseAlpha);
-      setTargetLat((ev.beta || 0) - 90);
+    function setAutoRotate(on) {
+      autoRotate = !!on;
+      viewer.setIdleMovement(IDLE_BEFORE_DRIFT_MS, autoRotate ? autorotate : null);
+      if (!autoRotate) viewer.stopMovement();
+      return autoRotate;
+    }
+
+    function zoomBy(delta) {
+      const v = current.view;
+      v.setFov(Math.max(MIN_FOV, Math.min(MAX_FOV, v.fov() + delta)));
       touched();
     }
-    function enableOrientation() {
-      if (typeof DeviceOrientationEvent !== "undefined" &&
-          typeof DeviceOrientationEvent.requestPermission === "function") {
-        DeviceOrientationEvent.requestPermission().then((res) => {
-          if (res === "granted") {
-            window.addEventListener("deviceorientation", orientationHandler, true);
-            orientationActive = true;
-          }
-        }).catch(() => {});
-      } else if (window.DeviceOrientationEvent) {
-        window.addEventListener("deviceorientation", orientationHandler, true);
-        orientationActive = true;
-      }
-      return orientationActive;
-    }
-
-    let running = true;
-    let lastFrame = performance.now();
-    const target = new THREE.Vector3();
-
-    function animate(now) {
-      if (!running) return;
-      requestAnimationFrame(animate);
-      const dt = Math.min(0.1, (now - lastFrame) / 1000);
-      lastFrame = now;
-
-      // A flick keeps going and slows down, rather than stopping the instant
-      // the finger lifts.
-      if (!dragging && Math.abs(spinVelocity) > 0.01) {
-        targetLon += spinVelocity;
-        spinVelocity *= FLICK_DECAY;
-      } else if (!dragging) {
-        spinVelocity = 0;
-        if (autoRotate && !orientationActive && now - lastInteraction > IDLE_BEFORE_DRIFT_MS) {
-          targetLon += DRIFT_DEG_PER_SEC * dt;
-        }
-      }
-
-      lon += (targetLon - lon) * DAMPING;
-      lat += (targetLat - lat) * DAMPING;
-      if (Math.abs(targetFov - fov) > 0.01) {
-        fov += (targetFov - fov) * DAMPING;
-        camera.fov = fov;
-        camera.updateProjectionMatrix();
-      }
-
-      const phi = THREE.MathUtils.degToRad(90 - lat);
-      const theta = THREE.MathUtils.degToRad(lon);
-      target.set(
-        500 * Math.sin(phi) * Math.cos(theta),
-        500 * Math.cos(phi),
-        500 * Math.sin(phi) * Math.sin(theta)
-      );
-      camera.lookAt(target);
-      renderer.render(scene, camera);
-    }
-    requestAnimationFrame(animate);
-
-    function onResize() {
-      camera.aspect = width() / height();
-      camera.updateProjectionMatrix();
-      renderer.setSize(width(), height());
-    }
-    window.addEventListener("resize", onResize);
-    // Fullscreen and rotation change the host without firing a window resize.
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(onResize) : null;
-    if (ro) ro.observe(host);
 
     return {
+      // --- the interface the old three.js viewer exposed, unchanged ---
       enableOrientation,
       toggleFullscreen,
-      setAutoRotate(on) { autoRotate = !!on; touched(); return autoRotate; },
+      setAutoRotate,
       isAutoRotating() { return autoRotate; },
-      zoomIn() { zoomBy(-12); touched(); },
-      zoomOut() { zoomBy(12); touched(); },
-      resetView() { targetLon = 0; setTargetLat(0); targetFov = START_FOV; touched(); },
+      zoomIn() { zoomBy(-ZOOM_STEP); },
+      zoomOut() { zoomBy(ZOOM_STEP); },
+      resetView() {
+        const init = current.data.initialView || {};
+        current.view.setYaw(init.yaw || 0);
+        current.view.setPitch(init.pitch || 0);
+        current.view.setFov(init.fov || START_FOV);
+        touched();
+      },
+
+      // --- new ---
+      switchTo,
+      /** Turn placing and the per-hotspot edit controls on or off.
+       *  The caller reloads hotspots afterwards; their markup differs. */
+      setEditable(on) { editable = !!on; return editable; },
+      isEditable() { return editable; },
+      currentSceneId() { return current.data.id; },
+      scenes() { return built.map((b) => b.data); },
+      reloadHotspots,
+      /** Where the user is looking now - used to seed a new hotspot's angle. */
+      lookDirection() {
+        return { yaw: current.view.yaw(), pitch: current.view.pitch() };
+      },
+      /** Point the view at a direction. Radians, pitch positive downwards. */
+      lookAt(yaw, pitch) {
+        if (typeof yaw === "number") current.view.setYaw(yaw);
+        if (typeof pitch === "number") current.view.setPitch(pitch);
+        touched();
+      },
+
       destroy() {
-        running = false;
-        // Named handlers throughout: the previous version passed fresh arrow
-        // functions to removeEventListener, which removes nothing at all and
-        // leaked a listener and a WebGL context per visit.
-        window.removeEventListener("resize", onResize);
-        window.removeEventListener("mousemove", onMouseMove);
-        window.removeEventListener("mouseup", onMouseUp);
-        window.removeEventListener("deviceorientation", orientationHandler, true);
-        dom.removeEventListener("mousedown", onMouseDown);
-        dom.removeEventListener("touchstart", onTouchStart);
-        dom.removeEventListener("touchmove", onTouchMove);
-        dom.removeEventListener("touchend", onTouchEnd);
-        dom.removeEventListener("wheel", onWheel);
-        dom.removeEventListener("dblclick", onDblClick);
-        dom.removeEventListener("keydown", onKeyDown);
-        if (ro) ro.disconnect();
-        if (texture) texture.dispose();
-        geometry.dispose();
-        if (mesh) mesh.material.dispose();
-        renderer.dispose();
-        if (dom.parentNode) dom.parentNode.removeChild(dom);
+        host.removeEventListener("pointerdown", onPointerDown);
+        host.removeEventListener("pointerup", onPointerUp);
+        if (orientationMethod) {
+          try {
+            viewer.controls().unregisterMethod("deviceOrientation");
+          } catch (_) {}
+          orientationMethod.destroy();
+        }
+        viewer.destroy();
       },
     };
   }
 
   return { create };
 })();
+
+
+// Look around by moving the phone.
+//
+// The engine ships no device-orientation control, only a demo of one. This is
+// that demo reduced to what Orbit needs: absolute alpha/beta/gamma turned into
+// yaw and pitch, with the first reading taken as the origin so the panorama
+// does not jump when it is switched on.
+function DeviceOrientationControl(view) {
+  this._view = view;
+  this._dynamics = null;
+  this._origin = null;
+  this._handler = this._onDeviceOrientation.bind(this);
+  window.addEventListener("deviceorientation", this._handler, true);
+}
+
+DeviceOrientationControl.prototype.destroy = function () {
+  window.removeEventListener("deviceorientation", this._handler, true);
+  this._view = null;
+};
+
+DeviceOrientationControl.prototype._onDeviceOrientation = function (ev) {
+  if (ev.alpha == null || !this._view) return;
+  const DEG = Math.PI / 180;
+  if (this._origin == null) this._origin = ev.alpha;
+
+  // alpha grows anticlockwise seen from above; panorama yaw grows the other
+  // way, hence the minus. It is measured from the first reading rather than
+  // from north, so switching this on does not make the view jump.
+  this._view.setYaw(-(ev.alpha - this._origin) * DEG);
+
+  // beta is 90 with the phone held upright facing the horizon, and grows as
+  // the top of the phone tilts away from you - which points the REAR camera
+  // upwards.
+  //
+  // The engine's pitch is positive DOWNWARDS: screenToCoordinates maps the top
+  // of the screen to a negative pitch. So tilting up has to produce a negative
+  // pitch, and the minus here is the whole reason this comment exists - without
+  // it, raising the phone looked at the floor.
+  //
+  // Checked against the engine's own device-orientation conversion, which
+  // returns -0.349 rad for beta=110 and +0.349 for beta=70.
+  const pitch = -((ev.beta || 0) - 90) * DEG;
+  this._view.setPitch(Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch)));
+};
+
+// The engine's control registry expects these, even for a method that only
+// writes to the view directly.
+DeviceOrientationControl.prototype.start = function () {};
+DeviceOrientationControl.prototype.stop = function () {};
