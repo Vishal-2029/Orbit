@@ -65,8 +65,9 @@ Orbit/
 │   ├── cmd/api/            the server
 │   ├── cmd/storagectl/     storage stats, verify and orphan cleanup CLI
 │   └── internal/domain/    the capture guidance engine
-├── cv-worker/        Python — EXIF, normalise, align, stitch, encode
+├── cv-worker/        Python — EXIF, normalise, align, stitch, tile, encode
 ├── web/              Zero-build camera client + 360 viewer (no npm needed)
+│   └── vendor/             the panorama engine, built by scripts/
 ├── scripts/          dev.sh, test photo generator, end-to-end test
 ├── docs/             the documentation table above
 └── docker-compose.yml   Postgres, MinIO, Redis
@@ -94,6 +95,8 @@ A 360 with a visible seam beats an error screen.
 | Storage layer + orphan sweeper + CLI | working, 10 integration tests |
 | Python CV worker (normalise, align, stitch, degrade) | working |
 | Web camera client + sphere/frame viewers | working |
+| Hotspots — info notes and direction arrows between captures | working |
+| Cube tiles for sharper zoom and lower memory | working |
 | Authentication, rate limits, quotas | **not built — do not deploy publicly** |
 | Flutter client | not built; the web client covers the same flow |
 

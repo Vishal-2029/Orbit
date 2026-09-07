@@ -194,3 +194,99 @@ POST /api/v1/internal/captures/:id/finalize
      {"stitched":true,"panorama_key":"...","width":4096,"height":2048}
      {"stitched":false,"failure_cause":"Not enough overlap between photos."}
 ```
+
+---
+
+## Hotspots
+
+Markers placed inside a finished 360. Two kinds: `info` opens a note, `link` is
+an arrow to another capture.
+
+Angles are **radians**, with pitch positive DOWNWARDS — the viewer's convention,
+and the opposite of `frames.pitch`. This differs deliberately from the compass
+bearing on a frame: that is where the phone was pointed, this is where a marker
+was placed.
+
+### `GET /api/v1/captures/{id}/hotspots`
+
+```json
+{
+  "hotspots": [
+    {
+      "id": "0f8c…", "capture_id": "3a71…", "kind": "info",
+      "yaw": 1.2043, "pitch": -0.3117,
+      "title": "The fireplace", "body": "Original 1890s tiling.",
+      "created_at": "2026-09-07T12:00:00Z", "updated_at": "2026-09-07T12:00:00Z"
+    },
+    {
+      "id": "b204…", "capture_id": "3a71…", "kind": "link",
+      "yaw": -1.5708, "pitch": 0.0872,
+      "target_capture_id": "9d55…", "rotation": 1.5708
+    }
+  ]
+}
+```
+
+### `POST /api/v1/captures/{id}/hotspots`
+
+```json
+{ "kind": "info", "yaw": 1.2043, "pitch": -0.3117,
+  "title": "The fireplace", "body": "Original 1890s tiling." }
+```
+
+```json
+{ "kind": "link", "yaw": -1.5708, "pitch": 0.0872,
+  "target_capture_id": "9d55…", "rotation": 1.5708 }
+```
+
+`201` with the created hotspot. `400` with a plain-English `error` when the
+request does not make sense — an info hotspot with no title, a link with no
+target, a link pointing at its own capture, or a target that is still processing
+and therefore has no sphere to open.
+
+### `PATCH /api/v1/hotspots/{hotspotId}`
+
+Same body, all fields optional. `kind` cannot be changed: that turns the hotspot
+into a different thing, and deleting and re-creating is clearer.
+
+### `DELETE /api/v1/hotspots/{hotspotId}` → `204`
+
+### `GET /api/v1/captures/{id}/tiles/{z}/{f}/{y}/{x}.jpg`
+
+One cube tile. `f` is one of `f u d l r b`; `z` is the level index into the
+manifest's `levels`. Served only when the worker produced tiles.
+
+> **No authentication.** These are write endpoints and nothing checks ownership.
+> The web client only shows editing controls on the by-id route, which keeps a
+> share link read-only in practice, but anyone who learns a capture's id can call
+> these directly. Do not expose them publicly until auth exists.
+
+## What the viewer gets
+
+The manifest gains three things when they apply. All are optional and a client
+that ignores them still works.
+
+```json
+{
+  "renderer": "sphere",
+  "panorama": "/api/v1/captures/3a71…/image/panorama",
+
+  "hotspots": [ … ],
+
+  "tiles":   "/api/v1/captures/3a71…/tiles/{z}/{f}/{y}/{x}.jpg",
+  "levels":  [{"tileSize":256,"size":256},
+              {"tileSize":512,"size":512},
+              {"tileSize":1024,"size":1024}],
+
+  "scenes": [
+    { "id": "3a71…", "slug": "hall", "title": "Hall",
+      "panorama": "…", "hotspots": [ … ] },
+    { "id": "9d55…", "slug": "kitchen", "title": "Kitchen",
+      "panorama": "…", "hotspots": [ … ] }
+  ]
+}
+```
+
+`tiles` is a URL **template**, not a URL. `scenes` appears only when link
+hotspots reach another capture, and its first entry is always the capture that
+was asked for.

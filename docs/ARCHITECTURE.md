@@ -201,6 +201,75 @@ Anything short of 360 (within `FULL_TURN_TOLERANCE_DEG`) is reported as not
 stitched, with a plain-English reason, and shown in the frame viewer. Padding it
 onto a sphere would stretch it by however much of the world is missing.
 
+## The viewer
+
+### Why the sphere is not hand-rolled any more
+
+`web/screens/viewer-sphere.js` runs on a vendored panorama engine
+(`web/vendor/pano-engine.js`, built by `scripts/build-pano-engine.sh`,
+Apache 2.0, exposed as the global `OrbitPano`). It replaced a hand-written
+three.js sphere, which is still in `viewer-sphere-three.js` for one release.
+
+The sphere was never the problem. Everything built on top of it needs two pieces
+of projection maths the engine has and three.js does not:
+
+| | what it does | needed for |
+|---|---|---|
+| `coordinatesToScreen` | yaw/pitch → screen x,y | drawing a hotspot |
+| `screenToCoordinates` | screen x,y → yaw/pitch | **placing one by clicking** |
+
+The second one is the hotspot editor. Without it, placing a marker by clicking
+means writing sphere raycasting by hand and then writing it again the first time
+the projection changes.
+
+Note the pitch convention: **positive is DOWNWARDS**, the opposite of
+`frames.pitch`. A click at the top of the screen comes back negative. Getting
+that backwards is what had the gyroscope looking at the floor when the phone was
+raised.
+
+### Hotspots
+
+Two kinds, one table (`backend/migrations/003_hotspots.sql`):
+
+* **info** — a marker that opens a title and a paragraph
+* **link** — an arrow that walks the viewer to another capture
+
+Angles are stored in RADIANS, which is what the projection speaks, so nothing
+converts at the edges. Hotspots are **not** baked into the stored manifest: that
+JSON is written once when the stitch finishes, and markers are placed long
+afterwards, so they are joined on at read time by `ManifestWithScenes`.
+
+A link hotspot makes a capture the entry point to a small graph of them. There is
+no "tour" entity - the graph is implicit in `target_capture_id`, and
+`LinkedCaptureIDs` walks it with a recursive CTE, depth-capped, skipping captures
+that have no sphere to show. Every reachable panorama is built up front so
+walking through a door cross-fades instead of reloading the page.
+
+Editing is offered on `#/view-id/:id` and not on the public `#/view/:slug`. That
+is a usability boundary, **not a security one** - there is no authentication yet,
+so anyone who learns a capture's id can still call the endpoints directly.
+
+### Cube tiles
+
+`cv-worker/ops/tiles.py` also cuts each finished panorama into six cube faces at
+three resolutions. An equirect has to be uploaded to the GPU as ONE texture:
+older phones refuse anything wider than 4096 and show a black sphere with no
+error, and even where it is accepted a 4096x2048 texture is 32MB of video memory
+held open. Tiles are fetched only where the viewer is looking.
+
+Tiles are optional throughout. If anything fails the capture is still a working
+360 - the manifest simply has no `tiles` field and the viewer renders the
+equirectangular JPEG, which is also what happens for every capture made before
+this existed.
+
+**One tile per face per level**, deliberately. Subdividing a face into a grid is
+the usual way to tile and it is not done here: with any level whose tile is
+smaller than its face, the viewer drew the face being looked at and left its
+neighbours black - 16% of the frame, two bars down the sides - across all four
+combinations of `fallbackOnly` and `pinFirstLevel`. Every un-subdivided pyramid
+renders correctly. Nothing is lost at this resolution, where a face is 1024
+square and about 150KB. Worth revisiting past ~2048.
+
 ### Making the result a real photo sphere
 
 A 2:1 equirectangular JPEG is just a wide photo until something tells a viewer
