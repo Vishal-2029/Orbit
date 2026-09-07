@@ -95,13 +95,111 @@ def test_yaw_maps_to_even_horizontal_spacing():
         step = xs[i] - xs[i - 1]
         # Past 180 degrees the position wraps; compare on the circle.
         step = (step + circumference / 2) % circumference - circumference / 2
-        check("30 deg of yaw moves %.1f px (got %.1f)" % (30 * px_per_deg, step),
-              abs(step - 30 * px_per_deg) < 1.0)
+        # NEGATIVE, and that sign is the whole point. yawed() turns the phone
+        # anticlockwise seen from above - the user turning LEFT - so the photo
+        # belongs to the LEFT of the one before it, at a smaller x.
+        #
+        # This check used to demand a positive step. It passed for as long as
+        # camera_rotation ran azimuth backwards, because it only ever compared
+        # the code against itself: even spacing, consistent direction, nothing
+        # anchored to a real scene. test_yaw_matches_a_known_scene below is
+        # what actually pins the direction down.
+        check("30 deg of yaw moves %.1f px (got %.1f)" % (-30 * px_per_deg, step),
+              abs(step + 30 * px_per_deg) < 1.0)
 
 
 def pitched(deg):
     h = math.radians(deg) / 2
     return qmul(upright(), [math.sin(h), 0, 0, math.cos(h)])
+
+
+def _equirect_with_landmarks():
+    """A synthetic 360 with a distinctly coloured letter every 90 degrees.
+
+    Longitude runs left to right, so in this source image the landmarks appear
+    in the order F, R, P, L. Any correct rendering of the same scene must show
+    them in that cyclic order too.
+    """
+    W, H = 2048, 1024
+    eq = np.full((H, W, 3), 110, np.uint8)
+    rng = np.random.default_rng(11)
+    for _ in range(2500):                      # texture, so the warp is visible
+        cv2.circle(eq, (int(rng.integers(0, W)), int(rng.integers(0, H))),
+                   int(rng.integers(3, 12)),
+                   tuple(int(v) for v in rng.integers(0, 255, 3)), -1)
+    for deg, colour in ((0, (0, 0, 255)), (90, (0, 255, 0)),
+                        (180, (255, 0, 0)), (270, (0, 255, 255))):
+        x = int(deg / 360.0 * W)
+        for dx in (-W, 0, W):                  # draw across the wrap too
+            cv2.rectangle(eq, (x + dx - 40, H // 2 - 60),
+                          (x + dx + 40, H // 2 + 60), colour, -1)
+    return eq
+
+
+def _view_at(eq, lon_deg, w, h, hfov):
+    """The perspective photo whose optical axis points at this longitude."""
+    a = math.radians(lon_deg)
+    R = np.array([[math.cos(a), 0, -math.sin(a)],
+                  [0, 1, 0],
+                  [math.sin(a), 0, math.cos(a)]], np.float32)
+    f = (w / 2.0) / math.tan(math.radians(hfov) / 2.0)
+    j, i = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    d = np.stack([(j - w / 2) / f, (i - h / 2) / f, np.ones_like(j)], -1)
+    d /= np.linalg.norm(d, axis=-1, keepdims=True)
+    v = d @ R
+    lon = np.arctan2(v[..., 0], v[..., 2])
+    lat = np.arcsin(np.clip(v[..., 1], -1, 1))
+    return cv2.remap(eq,
+                     (((lon / (2 * math.pi)) + .5) * eq.shape[1]).astype(np.float32),
+                     (((lat / math.pi) + .5) * eq.shape[0]).astype(np.float32),
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+
+
+def test_yaw_matches_a_known_scene():
+    """Does the finished sphere actually agree with the room it was shot in?
+
+    Every other yaw test here compares the code against itself: it checks that
+    the spacing is even and the direction consistent, which stays true whether
+    azimuth runs forwards or backwards. A mirrored 360 passes all of them.
+
+    This one renders photos FROM a known panorama, stitches them back, and
+    checks the landmarks come out in the order they went in.
+
+    yawed(d) turns the phone anticlockwise seen from above, so its optical axis
+    sweeps towards NEGATIVE longitude - hence the -d here.
+    """
+    eq = _equirect_with_landmarks()
+    imgs, quats = [], []
+    for k in range(12):
+        d = k * 30
+        imgs.append(_view_at(eq, -d, 480, 640, ps.DEFAULT_HFOV_DEG))
+        quats.append(yawed(d))
+
+    ok, pano, reason = ps.stitch_with_poses(imgs, quats)
+    check("a full turn of known views stitches", ok, str(reason))
+    if not ok:
+        return
+
+    width = pano.shape[1]
+    bearings = {}
+    for name, colour in (("F", (0, 0, 255)), ("R", (0, 255, 0)),
+                         ("P", (255, 0, 0)), ("L", (0, 255, 255))):
+        hit = np.abs(pano.astype(np.int16) - np.array(colour, np.int16)).sum(2) < 90
+        if hit.sum() < 200:
+            continue
+        # Circular mean: a landmark may straddle the wrap and appear at both ends.
+        a = np.where(hit.any(0))[0] / float(width) * 2 * math.pi
+        bearings[name] = math.degrees(
+            math.atan2(np.sin(a).mean(), np.cos(a).mean()) % (2 * math.pi))
+
+    check("all four landmarks survive the stitch", len(bearings) == 4, str(sorted(bearings)))
+    if len(bearings) != 4:
+        return
+
+    order = "".join(n for n, _ in sorted(bearings.items(), key=lambda kv: kv[1]))
+    check("the scene is not mirrored: landmarks keep their real order",
+          order in "FRPL" * 2,
+          "left to right got %s, wanted a rotation of FRPL" % order)
 
 
 def test_pitch_moves_the_right_way():
@@ -184,12 +282,11 @@ def test_photo_content_keeps_its_orientation():
         img[10:80, 10:120] = 255                    # white, top-LEFT
         img[400:470, 520:630] = (0, 0, 255)         # red, bottom-RIGHT
 
-        ok, pano, reason = ps.stitch_with_poses([img], [yawed(deg)])
         # A single photo is refused by design, so exercise the warp directly
-        # through the same helper the stitcher uses.
-        img_r = cv2.rotate(img, cv2.ROTATE_180)
+        # through the same helper the stitcher uses. The source goes in as-is:
+        # the stitcher no longer pre-rotates it, so neither does this.
         warper = cv2.PyRotationWarper("spherical", f)
-        _, w = warper.warp(img_r, K, ps.camera_rotation(yawed(deg)),
+        _, w = warper.warp(img, K, ps.camera_rotation(yawed(deg)),
                            cv2.INTER_NEAREST, cv2.BORDER_CONSTANT)
         if w.shape[1] > circumference / 2:
             continue                                # this one straddles the seam
@@ -305,6 +402,7 @@ def test_full_sphere_capture_with_pole_shots():
 if __name__ == "__main__":
     for fn in [test_quaternion_matrix, test_camera_rotation_is_a_rotation,
                test_intrinsics, test_yaw_maps_to_even_horizontal_spacing,
+               test_yaw_matches_a_known_scene,
                test_pitch_moves_the_right_way,
                test_yaw_goes_one_consistent_direction,
                test_first_photo_is_not_split_across_the_seam,

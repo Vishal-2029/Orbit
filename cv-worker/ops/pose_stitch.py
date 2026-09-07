@@ -62,46 +62,53 @@ def quaternion_to_matrix(x, y, z, w):
     ], dtype=np.float32)
 
 
-# The phone reports rotation in the DEVICE frame: +X right, +Y up, +Z out of the
-# screen towards the user, so the rear camera looks along -Z.
-# OpenCV's camera frame is +X right, +Y DOWN, +Z FORWARD.
-# This flips the two axes that disagree.
-_DEVICE_TO_CV = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
-
-# One more frame to reconcile. The phone's world frame is gravity-aligned with
-# +Z UP. OpenCV's spherical warper spins its sphere around the world +Y axis,
-# so its vertical axis is Y, pointing DOWN.
+# OpenCV's spherical warper takes R as a CAMERA-TO-WORLD matrix: it maps an
+# image pixel to R @ K^-1 @ p and reads the direction straight off that. It
+# then measures azimuth as atan2(x, z), and height as the angle away from +Y
+# with +Y at the BOTTOM of the panorama.
 #
-# Without this the photos land on the poles, where a sphere stretches without
-# limit: a single 65-degree view smears across the entire 360 circumference and
-# the canvas explodes. With it, each view occupies the narrow slice it should.
-# The warper's vertical axis points DOWN, and the sensor's +Z points UP, so the
-# sign here decides whether the sky ends up at the top of the panorama or the
-# bottom. Getting it backwards produced a vertically mirrored 360 - photos of
-# the ceiling appeared underfoot.
-#   X_warp = X_sensor,  Y_warp = +Z_sensor,  Z_warp = -Y_sensor
-_SENSOR_TO_WARPER = np.array([[1, 0, 0],
-                              [0, 0, 1],
-                              [0, -1, 0]], dtype=np.float32)
+# Two changes of frame get us there from a phone quaternion, and nothing else.
 
+# 1. OpenCV's camera frame (+X right, +Y DOWN, +Z FORWARD) expressed in the
+#    phone's DEVICE frame (+X right, +Y up, +Z out of the screen towards the
+#    user, so the rear camera looks along -Z). Two axes disagree.
+_CAM_TO_DEVICE = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
 
-# Half a turn about the sphere's own axis, applied last.
+# 2. The phone's world frame is gravity-aligned, right-handed, +Z UP, and the
+#    warper's world has +Y DOWN. Line them up:
+#      X_warp = X_phone,  Y_warp = -Z_phone,  Z_warp = +Y_phone
+#    so the phone's reference heading becomes the warper's +Z and "up" becomes
+#    -Y.
 #
-# Without it the reference direction - the way the user was facing for their
-# first photo - lands exactly on the panorama's wrap seam, so that photo is
-# sliced in half and shows up at BOTH edges of the finished 360. Rotating the
-# whole world half a turn puts the starting view in the middle instead, where
-# it belongs.
-_HALF_TURN = np.array([[-1, 0, 0],
-                       [0, 1, 0],
-                       [0, 0, -1]], dtype=np.float32)
+#    The vertical sign decides whether the sky ends up overhead or underfoot.
+#    The HANDEDNESS decides something subtler, and getting it wrong is the bug
+#    this replaced. The old chain transposed the phone rotation and used the
+#    inverse of this matrix. That is still a valid rotation, so every geometric
+#    check kept passing - the photos were evenly spaced, the spacing was
+#    consistent, the poles were the right way up - but azimuth ran BACKWARDS.
+#    A photo taken while turning right was placed to the left, so the finished
+#    360 was the scene reversed end to end. Each tile's own content stayed
+#    upright, which is why it never looked obviously broken; you had to compare
+#    it against the room to see it.
+#
+#    It is pinned now by rendering a synthetic panorama with landmarks at 0,
+#    90, 180 and 270 degrees and requiring them to come back in that order.
+_PHONE_TO_WARPER = np.array([[1, 0, 0],
+                             [0, 0, -1],
+                             [0, 1, 0]], dtype=np.float32)
 
 
 def camera_rotation(quat):
-    """Device quaternion -> the world-to-camera matrix OpenCV's warper wants."""
+    """Device quaternion -> the camera-to-world matrix OpenCV's warper wants.
+
+    No half-turn correction. An earlier version applied one to stop the user's
+    starting direction landing on the wrap seam, but that was only necessary
+    because the transposed chain above had put it there. With the frames
+    converted correctly the reference heading sits mid-panorama on its own and
+    the seam falls behind the user, where it belongs.
+    """
     r_world_from_device = quaternion_to_matrix(*quat)
-    m = _DEVICE_TO_CV @ r_world_from_device.T @ _SENSOR_TO_WARPER.T
-    return (_HALF_TURN @ m).astype(np.float32)
+    return (_PHONE_TO_WARPER @ r_world_from_device @ _CAM_TO_DEVICE).astype(np.float32)
 
 
 def intrinsics(width, height, hfov_deg=DEFAULT_HFOV_DEG):
@@ -146,12 +153,10 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             img = images[i]
             if img.shape[:2] != (h, w):
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-            # The warper lays each photo down rotated half a turn about its own
-            # optical axis. That leaves the photo's CENTRE in the right place -
-            # which is why measuring centres never caught it - while the
-            # content inside is upside down and back to front. Rotating the
-            # source by the same amount cancels it exactly.
-            img = cv2.rotate(img, cv2.ROTATE_180)
+            # No half-turn of the source here either. It used to be needed to
+            # cancel one the warper appeared to apply; that apparent rotation
+            # was the transposed camera_rotation above, and the two errors hid
+            # each other.
             R = camera_rotation(quats[i])
 
             corner, wimg = warper.warp(img, K, R, cv2.INTER_LINEAR, cv2.BORDER_REFLECT)

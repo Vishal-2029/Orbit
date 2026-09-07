@@ -35,19 +35,34 @@ def stitch_panorama(images):
     """images: list of BGR ndarrays, already sorted by yaw.
 
     Returns (success: bool, result_img_or_None, reason_or_None).
-    Tries SCANS mode first (better for ring/rotation captures with
-    similar camera positions), falls back to PANORAMA mode.
+    Tries PANORAMA mode first, falls back to SCANS.
     Never raises - all OpenCV/runtime errors are converted to a plain
     English failure reason so the caller can report a graceful fallback.
+
+    PANORAMA is the mode that matches what this app asks people to do. It warps
+    onto a sphere and solves for a ROTATION per photo, which is exactly a user
+    pivoting on the spot. SCANS solves for an AFFINE transform on a flat plane
+    instead - it is meant for a camera sliding parallel to a wall or a document.
+
+    They used to be tried the other way round, on the reasoning that a ring
+    capture has "similar camera positions". That is backwards, and it was the
+    single worst defect in the pipeline: SCANS almost always returns success,
+    so PANORAMA was rarely even reached, and its planar output was then handed
+    to pad_to_equirect and mapped onto a full sphere. On a synthetic 12-photo
+    turn with perfect 35-degree overlap, SCANS covered 150 degrees of the 360
+    and dropped half the photos, and that 150 degrees was then stretched around
+    the whole sphere.
+
+    SCANS is kept only as a last resort, because some result beats none.
     """
     if len(images) < 2:
         return False, None, "Need at least 2 processed photos to attempt a stitch."
 
     modes = []
-    if hasattr(cv2, "Stitcher_SCANS"):
-        modes.append(("SCANS", cv2.Stitcher_SCANS))
     if hasattr(cv2, "Stitcher_PANORAMA"):
         modes.append(("PANORAMA", cv2.Stitcher_PANORAMA))
+    if hasattr(cv2, "Stitcher_SCANS"):
+        modes.append(("SCANS", cv2.Stitcher_SCANS))
 
     last_reason = "Stitching failed for an unknown reason."
     for name, mode in modes:
