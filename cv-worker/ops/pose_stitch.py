@@ -12,6 +12,7 @@ onto the sphere. A featureless wall places just as reliably as a bookshelf.
 This is the approach Street View capture uses, and it is why it copes with
 surfaces that defeat pure feature matching.
 """
+import collections
 import logging
 import gc
 import math
@@ -60,6 +61,62 @@ def quaternion_to_matrix(x, y, z, w):
         [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
     ], dtype=np.float32)
+
+
+
+class SphereGeometry(collections.namedtuple(
+        "SphereGeometry", "circumference_px equator_y")):
+    """Where the world sits in a panorama this module built.
+
+    circumference_px  pixels for one full turn, i.e. 2*pi*focal
+    equator_y         the row the horizon falls on
+
+    The finishing stage cannot recover either of these from the pixels, and
+    guessing them is what made a partial capture come out stretched over a whole
+    sphere. They are cheap to carry, so they are carried.
+    """
+    __slots__ = ()
+
+
+def _qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz]
+
+
+def quaternion_from_heading(yaw_deg, pitch_deg=0.0):
+    """Build a device quaternion from the compass heading and tilt of a shot.
+
+    Not every photo arrives with a sensor quaternion - an older phone, a denied
+    permission, a browser that does not expose the rotation vector - and until
+    now that dropped the whole capture onto feature matching, which is the path
+    that fails on blank walls. But the guided capture flow cannot work at all
+    without knowing where the phone is pointing, so every frame it plans already
+    carries a yaw and a pitch. That is enough to place a photo on the sphere.
+
+    What is lost is ROLL: yaw and pitch cannot express a phone tilted sideways,
+    so this assumes it was held square. For a guided capture, where the app
+    shows a levelling hint and the user is turning on the spot, that is a much
+    smaller error than not placing the photo at all.
+
+    yaw_deg   compass bearing, 0 = the reference direction, measured CLOCKWISE
+    pitch_deg 0 at the horizon, positive looking up
+    """
+    # Clockwise seen from above is a NEGATIVE rotation about the world's up
+    # axis in a right-handed frame, hence the minus.
+    hz = math.radians(-float(yaw_deg)) / 2.0
+    q_yaw = [0.0, 0.0, math.sin(hz), math.cos(hz)]
+
+    # A phone held upright is already a quarter turn about its own X axis: the
+    # device's +Y (its top edge) has to end up pointing at the sky. Pitch is a
+    # further rotation about the same axis, so the two simply add.
+    hx = math.radians(90.0 + float(pitch_deg)) / 2.0
+    q_upright_and_pitch = [math.sin(hx), 0.0, 0.0, math.cos(hx)]
+
+    return _qmul(q_yaw, q_upright_and_pitch)
 
 
 # OpenCV's spherical warper takes R as a CAMERA-TO-WORLD matrix: it maps an
@@ -125,11 +182,12 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
     images: list of BGR arrays.
     quats:  list of [x,y,z,w] or None, one per image.
 
-    Returns (ok, panorama_or_None, reason_or_None). Never raises.
+    Returns (ok, panorama_or_None, reason_or_None, SphereGeometry_or_None).
+    Never raises.
     """
     usable = [i for i, q in enumerate(quats) if q is not None]
     if len(usable) < 2:
-        return False, None, "Not enough photos carry camera-rotation data."
+        return False, None, "Not enough photos carry camera-rotation data.", None
 
     try:
         h, w = images[usable[0]].shape[:2]
@@ -187,25 +245,33 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
 
         if len(warped) < 2:
             return False, None, ("These photos are too large to place onto a sphere. "
-                                 "Try again with fewer or smaller photos.")
+                                 "Try again with fewer or smaller photos."), None
 
-        pano = _blend(warped, masks, corners)
+        pano, _, y0 = _blend(warped, masks, corners)
         if pano is None:
-            return False, None, "The photos could not be combined onto the sphere."
+            return False, None, "The photos could not be combined onto the sphere.", None
 
-        log.info("[orbit-worker] pose stitch placed %d photo(s) from recorded rotations",
-                 len(usable))
-        return True, pano, None
+        # Both of these fall straight out of the projection. The warper lays the
+        # sphere out at `focal` pixels per radian, so a full turn is 2*pi*focal
+        # wide and the horizon - the ray with no vertical component - lands at
+        # focal * pi/2. Subtracting the canvas origin puts that in image rows.
+        geom = SphereGeometry(circumference_px=2.0 * math.pi * focal,
+                              equator_y=focal * math.pi / 2.0 - y0)
+
+        log.info("[orbit-worker] pose stitch placed %d photo(s) from recorded "
+                 "rotations; one turn is %.0f px, horizon at row %.0f",
+                 len(warped), geom.circumference_px, geom.equator_y)
+        return True, pano, None, geom
 
     except MemoryError:
         log.warning("[orbit-worker] pose stitch ran out of memory")
-        return False, None, "These photos are too large to place onto a sphere."
+        return False, None, "These photos are too large to place onto a sphere.", None
     except cv2.error as e:
         log.warning("[orbit-worker] pose stitch cv2 error: %s", e)
-        return False, None, "The camera rotations recorded with these photos could not be used."
+        return False, None, "The camera rotations recorded with these photos could not be used.", None
     except Exception as e:
         log.warning("[orbit-worker] pose stitch %s: %s", type(e).__name__, e)
-        return False, None, "Something went wrong placing the photos onto the sphere."
+        return False, None, "Something went wrong placing the photos onto the sphere.", None
 
 
 def _compensate_exposure(warped, masks, corners):
@@ -297,20 +363,24 @@ def _find_seams(warped, masks, corners):
 
 
 def _blend(warped, masks, corners):
-    """Multi-band blend the warped images onto one canvas."""
+    """Multi-band blend the warped images onto one canvas.
+
+    Returns (image, x0, y0) - the canvas origin comes back because the caller
+    needs it to say where the horizon ended up.
+    """
     sizes = [(im.shape[1], im.shape[0]) for im in warped]
     x0 = min(c[0] for c in corners)
     y0 = min(c[1] for c in corners)
     x1 = max(c[0] + s[0] for c, s in zip(corners, sizes))
     y1 = max(c[1] + s[1] for c, s in zip(corners, sizes))
     if x1 <= x0 or y1 <= y0:
-        return None
+        return None, 0, 0
     # A canvas this large means the geometry is wrong, not that the photo is
     # detailed. Refuse rather than trying to allocate gigabytes.
     if (x1 - x0) * (y1 - y0) > MAX_CANVAS_PX:
         log.warning("[orbit-worker] pose stitch canvas %dx%d is implausible; refusing",
                     x1 - x0, y1 - y0)
-        return None
+        return None, 0, 0
 
     _compensate_exposure(warped, masks, corners)
     seamed = _find_seams(warped, masks, corners)
@@ -337,4 +407,4 @@ def _blend(warped, masks, corners):
     for im, mask, corner in zip(warped, masks, corners):
         blender.feed(im.astype(np.int16), mask, corner)
     result, _ = blender.blend(None, None)
-    return cv2.convertScaleAbs(result)
+    return cv2.convertScaleAbs(result), x0, y0

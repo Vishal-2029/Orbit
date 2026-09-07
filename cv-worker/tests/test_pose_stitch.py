@@ -175,7 +175,7 @@ def test_yaw_matches_a_known_scene():
         imgs.append(_view_at(eq, -d, 480, 640, ps.DEFAULT_HFOV_DEG))
         quats.append(yawed(d))
 
-    ok, pano, reason = ps.stitch_with_poses(imgs, quats)
+    ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
     check("a full turn of known views stitches", ok, str(reason))
     if not ok:
         return
@@ -200,6 +200,91 @@ def test_yaw_matches_a_known_scene():
     check("the scene is not mirrored: landmarks keep their real order",
           order in "FRPL" * 2,
           "left to right got %s, wanted a rotation of FRPL" % order)
+
+
+def test_quaternion_from_heading_matches_the_sensor():
+    """A rotation built from yaw and pitch must land where a real one would.
+
+    These two helpers are how the rest of this file describes a phone pointing
+    somewhere, so agreeing with them is agreeing with the sensor convention.
+    yawed() turns anticlockwise; a compass heading is clockwise; hence the sign.
+    """
+    for deg in (0, 30, 90, 180, 270, 359):
+        built = ps.quaternion_to_matrix(*ps.quaternion_from_heading(-deg))
+        sensed = ps.quaternion_to_matrix(*yawed(deg))
+        check("heading %d matches the sensor quaternion" % deg,
+              np.allclose(built, sensed, atol=1e-5))
+
+    for deg in (-45, -20, 20, 45):
+        built = ps.quaternion_to_matrix(*ps.quaternion_from_heading(0, deg))
+        sensed = ps.quaternion_to_matrix(*pitched(deg))
+        check("pitch %d matches the sensor quaternion" % deg,
+              np.allclose(built, sensed, atol=1e-5))
+
+
+def test_headings_alone_stitch_a_full_turn():
+    """The point of the fallback: no quaternion, still a sphere.
+
+    A phone that will not report a rotation vector used to drop the whole
+    capture onto feature matching - the one path a blank wall defeats - even
+    though the guided flow had recorded a heading for every shot all along.
+    """
+    eq = _equirect_with_landmarks()
+    # A photo taken at compass heading H shows the scene at longitude H: both
+    # run clockwise. So the heading passed here is the SAME number as the
+    # longitude rendered, and getting that pairing backwards is exactly how a
+    # mirrored panorama sneaks through - which is why the landmark order is
+    # checked below and not just the span. A mirrored sphere spans 360 too.
+    headings = [k * 30 for k in range(12)]
+    imgs = [_view_at(eq, h, 480, 640, ps.DEFAULT_HFOV_DEG) for h in headings]
+    quats = [ps.quaternion_from_heading(h) for h in headings]
+
+    ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
+    check("headings alone are enough to stitch", ok, str(reason))
+    if not ok:
+        return
+
+    span = float((pano > 10).any(axis=2).any(axis=0).sum()) / (
+        geom.circumference_px / 360.0)
+    check("they cover a full turn", abs(span - 360) < 15, "%.0f degrees" % span)
+
+    width = pano.shape[1]
+    bearings = {}
+    for name, colour in (("F", (0, 0, 255)), ("R", (0, 255, 0)),
+                         ("P", (255, 0, 0)), ("L", (0, 255, 255))):
+        hit = np.abs(pano.astype(np.int16) - np.array(colour, np.int16)).sum(2) < 90
+        if hit.sum() < 200:
+            continue
+        a = np.where(hit.any(0))[0] / float(width) * 2 * math.pi
+        bearings[name] = math.degrees(
+            math.atan2(np.sin(a).mean(), np.cos(a).mean()) % (2 * math.pi))
+    order = "".join(n for n, _ in sorted(bearings.items(), key=lambda kv: kv[1]))
+    check("and the scene is not mirrored", len(order) == 4 and order in "FRPL" * 2,
+          "left to right got %s, wanted a rotation of FRPL" % order)
+
+
+def test_geometry_comes_back_with_the_picture():
+    """finish_panorama cannot do its job without these two numbers."""
+    eq = _equirect_with_landmarks()
+    imgs = [_view_at(eq, -k * 30, 480, 640, ps.DEFAULT_HFOV_DEG) for k in range(12)]
+    quats = [yawed(k * 30) for k in range(12)]
+
+    ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
+    check("a stitch reports its geometry", ok and geom is not None, str(reason))
+    if not geom:
+        return
+
+    check("the panorama is no wider than one full turn",
+          pano.shape[1] <= geom.circumference_px + 4,
+          "%d px across, one turn is %.0f" % (pano.shape[1], geom.circumference_px))
+    check("the horizon is inside the picture",
+          0 <= geom.equator_y <= pano.shape[0],
+          "row %.0f of %d" % (geom.equator_y, pano.shape[0]))
+
+    # A level ring is symmetric about the horizon, so it should land mid-height.
+    check("a level ring puts the horizon at mid-height",
+          abs(geom.equator_y - pano.shape[0] / 2.0) < pano.shape[0] * 0.06,
+          "row %.0f of %d" % (geom.equator_y, pano.shape[0]))
 
 
 def test_pitch_moves_the_right_way():
@@ -306,7 +391,7 @@ def test_photo_content_keeps_its_orientation():
 
 def test_refuses_without_enough_poses():
     imgs = [np.zeros((64, 64, 3), np.uint8)] * 3
-    ok, out, reason = ps.stitch_with_poses(imgs, [None, None, None])
+    ok, out, reason, geom = ps.stitch_with_poses(imgs, [None, None, None])
     check("refuses when no photo has a pose", ok is False and out is None)
     check("gives a plain-english reason", bool(reason) and "rotation" in reason.lower(), str(reason))
 
@@ -320,7 +405,7 @@ def test_end_to_end_placement():
                    (int(30 * i) % 255, 200, (255 - 30 * i) % 255), -1)
         imgs.append(img)
         quats.append(yawed(i * 45))
-    ok, pano, reason = ps.stitch_with_poses(imgs, quats)
+    ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
     check("eight posed views stitch", ok is True, str(reason))
     if ok:
         h, w = pano.shape[:2]
@@ -350,7 +435,7 @@ def test_large_portrait_photos_do_not_explode():
         quats.append(yawed(i * 60))
 
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    ok, pano, reason = ps.stitch_with_poses(imgs, quats)
+    ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
     after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
     check("tall phone photos stitch instead of dying", ok is True, str(reason))
@@ -386,7 +471,7 @@ def test_full_sphere_capture_with_pole_shots():
         quats.append(pitched(pitch))
 
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    ok, pano, reason = ps.stitch_with_poses(imgs, quats)
+    ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
     after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
     check("a 13-photo sphere with pole shots stitches", ok is True, str(reason))
@@ -403,6 +488,9 @@ if __name__ == "__main__":
     for fn in [test_quaternion_matrix, test_camera_rotation_is_a_rotation,
                test_intrinsics, test_yaw_maps_to_even_horizontal_spacing,
                test_yaw_matches_a_known_scene,
+               test_quaternion_from_heading_matches_the_sensor,
+               test_headings_alone_stitch_a_full_turn,
+               test_geometry_comes_back_with_the_picture,
                test_pitch_moves_the_right_way,
                test_yaw_goes_one_consistent_direction,
                test_first_photo_is_not_split_across_the_seam,

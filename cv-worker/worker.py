@@ -381,7 +381,7 @@ def handle_finalize_job(mc, job):
     if posed >= 2 and posed >= len(ring) * 0.8:
         log.info("%s capture=%s: %d of %d photos carry camera rotations; "
                  "stitching from known poses", PREFIX, capture_id, posed, len(ring))
-        ok, pano, reason = stitch_with_poses(images, quats)
+        ok, pano, reason, geom = stitch_with_poses(images, quats)
         if ok and pano is not None:
             try:
                 pano = finish_panorama(pano)
