@@ -152,24 +152,54 @@ rotation, each one is projected straight onto the sphere with
 so **a blank wall places exactly as reliably as a bookshelf** - which is the
 failure mode plain feature matching cannot escape.
 
-Two coordinate changes are needed to get there, and both are easy to get wrong:
+OpenCV's warper wants R as **camera-to-world**, in a frame with +Y *down* and
+azimuth measured `atan2(x, z)`. Two changes of frame get there:
 
 | From | To | Why |
 |---|---|---|
-| device frame (+Y up, camera along -Z) | OpenCV camera (+Y down, +Z forward) | `diag(1,-1,-1)` |
-| sensor world (+Z up) | warper world (+Y down) | OpenCV's sphere spins about **Y** |
+| OpenCV camera (+Y down, +Z forward) | device frame (+Y up, camera along -Z) | `diag(1,-1,-1)` |
+| phone world (+Z up) | warper world (+Y down) | OpenCV's sphere spins about **Y** |
 
-Without the second one every photo lands on a pole, where a sphere stretches
-without limit: a single 65 degree view smears across the entire circumference
-and the canvas explodes. That is caught by a size guard and by
-`cv-worker/tests/test_pose_stitch.py`, which asserts that 30 degrees of yaw
-moves a photo by exactly `2*pi*f/12` pixels and that a 65 degree view stays a
-narrow slice.
+Get the vertical sign wrong and the sky ends up underfoot. Get the **handedness**
+wrong and something much quieter happens: the composition is still a valid
+rotation, photos are still evenly spaced and consistently ordered, but azimuth
+runs backwards and the finished 360 is the room reversed end to end. Every
+geometric test passed through that for a long time, because they all compared
+the code against itself. `test_yaw_matches_a_known_scene` is the one that pins
+it down: it renders photos *from* a panorama with landmarks at 0/90/180/270 and
+requires them to come back in that order.
 
-If fewer than 80% of the photos have rotations, or the pose stitch fails, the
-worker falls back to the coverage check plus feature matching described above.
-Photos imported from a gallery carry no rotation at all - messaging apps strip
-the metadata - so they always take the fallback path.
+### When there is no quaternion
+
+A phone that will not report a rotation vector does not have to lose the pose
+path. The guided flow cannot work at all without knowing where the camera is
+pointing, so every frame already carries a yaw and a pitch, and
+`quaternion_from_heading()` builds a rotation from those. Only roll is lost,
+which for someone turning on the spot with a levelling hint on screen is a far
+smaller error than dropping to feature matching - the one path a blank wall
+defeats.
+
+Genuinely pose-less captures - photos imported from a gallery, where messaging
+apps strip the metadata - go to `ops/feature_stitch.py`. That runs the matching
+pipeline out of `cv2.detail` rather than through `cv2.Stitcher`, for one reason:
+it keeps the camera parameters. `cv2.Stitcher` hands back a bare image and will
+not say what focal length it warped with, so nothing downstream can tell a full
+turn from a third of one. It also refines rotations only (`BundleAdjusterRay`,
+which is exactly the motion this app asks for) and wave-corrects the horizon.
+
+### Knowing how much of a turn you have
+
+`ops/finish.py` is given the circumference in pixels and the horizon row, and
+measures the span from the **columns that actually hold a photo** - not from the
+width of the canvas. The two come apart whenever a capture straddles the wrap:
+half a turn beginning near the seam fills both edges and leaves the middle
+empty, so the canvas is a full turn wide while most of it is blank. Counting
+occupied columns also catches a capture with a hole in it, where the user
+skipped a direction.
+
+Anything short of 360 (within `FULL_TURN_TOLERANCE_DEG`) is reported as not
+stitched, with a plain-English reason, and shown in the frame viewer. Padding it
+onto a sphere would stretch it by however much of the world is missing.
 
 ### Making the result a real photo sphere
 

@@ -40,9 +40,15 @@ localhost defaults match `docker-compose.yml` and the Go API's own defaults
 
 2. **`capture.finalize`** — polls `GET /api/v1/captures/{id}` (and
    `/frames`) until every frame is done or failed, or 180s elapses. For
-   `mode=pano`, sorts ring frames by yaw and attempts `cv2.Stitcher`
-   (SCANS mode first, then PANORAMA) to build an equirectangular panorama.
-   Success uploads to `captures/{id}/panorama.jpg` and reports
+   `mode=pano`, sorts ring frames by yaw and tries three stitchers in order,
+   stopping at the first that produces a picture: pose stitching from each
+   photo's recorded rotation (`ops/pose_stitch.py`), feature matching through
+   our own `cv2.detail` pipeline (`ops/feature_stitch.py`), and finally
+   `cv2.Stitcher` (`ops/stitch.py`, PANORAMA mode first). The first two report
+   the focal length they warped with, so the finishing stage can measure how
+   much of a turn the result really covers instead of assuming a full one; a
+   capture that falls short is reported as not stitched and shown in the frame
+   viewer. Success uploads to `captures/{id}/panorama.jpg` and reports
    `{"stitched": true, ...}`. Failure reports `{"stitched": false,
    "failure_cause": "<plain English>"}` — the Go side already falls back to
    the frame-swap viewer, so a failed stitch never crashes the worker or

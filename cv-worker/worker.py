@@ -26,9 +26,10 @@ from ops.normalize import (
     resize_to_width,
 )
 from ops.stitch import stitch_panorama
+from ops.feature_stitch import stitch_with_features
 from ops.finish import finish_panorama
-from ops.coverage import connected_groups, describe_leftovers, sphere_coverage
-from ops.pose_stitch import stitch_with_poses
+from ops.coverage import describe_leftovers, sphere_coverage
+from ops.pose_stitch import quaternion_from_heading, stitch_with_poses
 from ops.xmp import add_photosphere_metadata
 
 try:
@@ -279,6 +280,32 @@ def _quat_of(frame):
     return vals if any(abs(v) > 1e-9 for v in vals) else None
 
 
+def _pose_of(frame):
+    """The best rotation available for a frame, or None.
+
+    The sensor quaternion is preferred: it is the full rotation, roll included.
+    Failing that, a guided capture still knows where it pointed the camera -
+    the whole flow is built on planning yaw and pitch and telling the user to
+    aim there - and a rotation built from those two places the photo almost as
+    well.
+
+    That fallback matters more than it looks. Pose stitching is the path that
+    copes with blank walls, and without it a phone that would not report a
+    quaternion dropped the entire capture onto feature matching, which is
+    exactly the path a blank wall defeats. The photos always carried enough to
+    avoid that; nothing was asking them for it.
+    """
+    quat = _quat_of(frame)
+    if quat is not None:
+        return quat
+
+    yaw = frame.get("yaw")
+    if yaw is None:
+        return None
+    pitch = frame.get("pitch")
+    return quaternion_from_heading(yaw, pitch if pitch is not None else 0.0)
+
+
 def wait_for_frames(capture_id):
     """Poll GET /api/v1/captures/{id} until processed_count + failed == frame_count,
     or until the timeout elapses. Returns the last capture dict seen."""
@@ -317,6 +344,74 @@ def wait_for_frames(capture_id):
     except Exception:
         frames = []
     return last or {}, frames
+
+
+def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
+                        sphere_coverage=None, coverage_note=None):
+    """Clean up a raw stitch, and either publish it or degrade honestly.
+
+    Returns True when a sphere was published. A False return means the capture
+    has already been reported as not stitched, and the caller should stop.
+
+    The check that matters is `info.full_turn`. A stitch can succeed - every
+    photo placed, seams blended, nothing black left - and still only cover a
+    third of the way round. Mapping that onto a sphere stretches it by a factor
+    of three, which is what the old code did silently every time. Better to say
+    so and let the viewer swipe through the frames instead.
+    """
+    circumference = geom.circumference_px if geom else None
+    equator = geom.equator_y if geom else None
+    try:
+        pano, info = finish_panorama(pano, circumference_px=circumference,
+                                     equator_y=equator)
+    except Exception as e:
+        log.warning("%s panorama clean-up failed (%s: %s); using the raw stitch",
+                    PREFIX, type(e).__name__, e)
+        info = None
+
+    if info is not None and not info.full_turn:
+        reason = (
+            "These photos cover about %d degrees, not a full circle, so they "
+            "cannot be shown as a 360 sphere without stretching them. Keep "
+            "turning until you are back where you started, overlapping each "
+            "photo with the last by about a third." % round(info.span_deg)
+        )
+        log.warning("%s capture=%s: only %.0f degrees covered; "
+                    "degrading to the frame viewer", PREFIX, capture_id, info.span_deg)
+        report_finalize(capture_id, {
+            "stitched": False, "failure_cause": reason,
+            "photos_used": used, "photos_total": total,
+            "coverage_note": reason,
+        })
+        return False
+
+    h, w = pano.shape[:2]
+    # Mark it as a photo sphere so Google Maps, Google Photos and any
+    # photo-sphere viewer open it as a draggable 360 rather than a wide photo.
+    pano_bytes = add_photosphere_metadata(
+        encode_jpeg(pano, settings.jpeg_quality), w, h,
+        source_count=used, heading_deg=_true_north_heading(ring))
+    try:
+        put_object_bytes(mc, settings.bucket_public, panorama_key(capture_id), pano_bytes)
+    except Exception as e:
+        reason = "The panorama was stitched but could not be saved to storage."
+        log.error("%s capture=%s: %s (%s)", PREFIX, capture_id, reason, e)
+        report_finalize(capture_id, {"stitched": False, "failure_cause": reason})
+        return False
+
+    body = {
+        "stitched": True,
+        "panorama_key": panorama_key(capture_id),
+        "width": w, "height": h,
+        "photos_used": used, "photos_total": total,
+        "coverage_note": coverage_note or describe_leftovers(total, used),
+    }
+    if sphere_coverage is not None:
+        body["sphere_coverage"] = sphere_coverage
+    report_finalize(capture_id, body)
+    log.info("%s stitch succeeded capture=%s size=%sx%s using %d of %d",
+             PREFIX, capture_id, w, h, used, total)
+    return True
 
 
 def handle_finalize_job(mc, job):
@@ -371,135 +466,65 @@ def handle_finalize_job(mc, job):
         report_finalize(capture_id, {"stitched": False, "failure_cause": reason})
         return
 
-    # If the phone recorded its rotation for each shot, use that geometry
-    # directly instead of rediscovering it from pixels. This is the whole point
-    # of storing the quaternions: a blank wall places just as well as a
-    # bookshelf, because placement no longer depends on matchable detail.
-    quats = [_quat_of(f) for f in ring]
+    total = len(images)
+
+    # Rotations first, pixels second. If we know where the camera was pointing
+    # there is nothing to rediscover: a blank wall places as reliably as a
+    # bookshelf. _pose_of falls back to the recorded heading and tilt, so this
+    # now covers guided captures from phones that never gave up a quaternion.
+    quats = [_pose_of(f) for f in ring]
     posed = sum(1 for q in quats if q is not None)
 
-    if posed >= 2 and posed >= len(ring) * 0.8:
-        log.info("%s capture=%s: %d of %d photos carry camera rotations; "
-                 "stitching from known poses", PREFIX, capture_id, posed, len(ring))
+    if posed >= 2 and posed >= total * 0.8:
+        log.info("%s capture=%s: %d of %d photos carry a usable rotation; "
+                 "stitching from known poses", PREFIX, capture_id, posed, total)
         ok, pano, reason, geom = stitch_with_poses(images, quats)
         if ok and pano is not None:
-            try:
-                pano, _ = finish_panorama(pano)
-            except Exception as e:
-                log.warning("%s panorama clean-up failed (%s: %s); using raw",
-                            PREFIX, type(e).__name__, e)
-            h, w = pano.shape[:2]
-            # How much of the world these photos actually saw. Anything they
-            # missed shows up as a soft patch, and only more photos can fix it.
             src_h, src_w = images[0].shape[:2]
             coverage = sphere_coverage(
                 [q for q in quats if q is not None],
                 hfov_deg=65.0, aspect=src_h / float(src_w))
             log.info("%s capture=%s covers %.0f%% of the sphere",
                      PREFIX, capture_id, coverage * 100)
-
-            pano_bytes = add_photosphere_metadata(
-                encode_jpeg(pano, settings.jpeg_quality), w, h,
-                source_count=posed, heading_deg=_true_north_heading(ring))
-            try:
-                put_object_bytes(mc, settings.bucket_public,
-                                 panorama_key(capture_id), pano_bytes)
-            except Exception as e:
-                log.warning("%s could not store posed panorama: %s", PREFIX, e)
-            else:
-                report_finalize(capture_id, {
-                    "stitched": True,
-                    "panorama_key": panorama_key(capture_id),
-                    "width": w, "height": h,
-                    "photos_used": posed, "photos_total": len(ring),
-                    "coverage_note": describe_leftovers(len(ring), posed),
-                    "sphere_coverage": coverage,
-                })
-                log.info("%s pose stitch succeeded capture=%s size=%sx%s using %d of %d",
-                         PREFIX, capture_id, w, h, posed, len(ring))
-                return
+            # Whatever comes of it, the capture has been reported on: either a
+            # sphere was published or it was degraded to the frame viewer. Only
+            # a stitch that never produced a picture falls through to the next
+            # method - carrying on after a degrade would report twice.
+            _finish_and_publish(mc, capture_id, pano, geom, ring,
+                                used=posed, total=total,
+                                sphere_coverage=coverage)
+            return
         log.warning("%s capture=%s: pose stitch unusable (%s); "
                     "falling back to feature matching", PREFIX, capture_id, reason)
 
-    # Find out which photos actually overlap each other BEFORE stitching.
-    # The stitcher would otherwise quietly use the largest matching group and
-    # report plain success, leaving the user with a narrow strip presented as a
-    # full 360.
-    total = len(images)
-    try:
-        groups = connected_groups(images)
-    except Exception as e:
-        log.warning("%s coverage check failed (%s: %s); stitching everything",
-                    PREFIX, type(e).__name__, e)
-        groups = [list(range(total))]
-
-    best = groups[0] if groups else list(range(total))
-    used = len(best)
-    coverage_note = describe_leftovers(total, used)
-
-    if used < 2:
-        reason = (
-            f"None of your {total} photos overlap each other, so they cannot be "
-            "joined into a 360. Take them from one spot in a single continuous "
-            "turn, with each photo overlapping the last by about a third."
-        )
-        log.warning("%s capture=%s: no connected group", PREFIX, capture_id)
-        report_finalize(capture_id, {
-            "stitched": False, "failure_cause": reason,
-            "photos_used": used, "photos_total": total,
-            "coverage_note": reason,
-        })
-        return
-
-    if used < total:
-        log.warning("%s capture=%s: only %d of %d photos are connected; "
-                    "stitching that group only", PREFIX, capture_id, used, total)
-
-    stitch_images = [images[i] for i in best]
-    ok, pano, reason = stitch_panorama(stitch_images)
+    # No usable rotations. Match features instead - but through our own
+    # detail pipeline, which hands back the camera parameters. cv2.Stitcher
+    # will not, and without them nothing downstream can tell a full turn from a
+    # third of one.
+    ok, pano, reason, geom, kept = stitch_with_features(images)
     if ok and pano is not None:
-        # The raw stitcher result is ragged and black-padded, and its two ends
-        # do not meet. Clean it up before it ever becomes a sphere texture.
-        try:
-            pano, _ = finish_panorama(pano)
-        except Exception as e:
-            # A cosmetic step must never cost us a successful stitch.
-            log.warning("[orbit-worker] panorama clean-up failed (%s: %s); "
-                        "using the raw stitch", type(e).__name__, e)
-    if not ok:
-        log.warning("%s stitch failed for capture=%s: %s", PREFIX, capture_id, reason)
+        _finish_and_publish(mc, capture_id, pano, geom, ring,
+                            used=len(kept), total=total,
+                            coverage_note=describe_leftovers(total, len(kept)))
+        return
+    log.warning("%s capture=%s: feature stitch failed (%s); trying cv2.Stitcher",
+                PREFIX, capture_id, reason)
+
+    # Last resort. This one gives us no geometry at all, so finish_panorama has
+    # to fall back to assuming a full turn - the assumption that used to be made
+    # everywhere. It is kept only because some result beats none.
+    fallback_ok, fallback_pano, fallback_reason = stitch_panorama(images)
+    if not fallback_ok or fallback_pano is None:
         report_finalize(capture_id, {
-            "stitched": False, "failure_cause": reason,
-            "photos_used": used, "photos_total": total,
-            "coverage_note": coverage_note,
+            "stitched": False,
+            "failure_cause": reason or fallback_reason,
+            "photos_used": 0, "photos_total": total,
+            "coverage_note": reason or fallback_reason,
         })
         return
 
-    h, w = pano.shape[:2]
-    # Mark it as a photo sphere so Google Maps, Google Photos and any
-    # photo-sphere viewer open it as a draggable 360 rather than a wide photo.
-    pano_bytes = add_photosphere_metadata(
-        encode_jpeg(pano, settings.jpeg_quality), w, h,
-        source_count=used, heading_deg=_true_north_heading(ring))
-    try:
-        put_object_bytes(mc, settings.bucket_public, panorama_key(capture_id), pano_bytes)
-    except Exception as e:
-        reason = "The panorama was stitched but could not be saved to storage."
-        log.error("%s capture=%s: %s (%s)", PREFIX, capture_id, reason, e)
-        report_finalize(capture_id, {"stitched": False, "failure_cause": reason})
-        return
-
-    report_finalize(capture_id, {
-        "stitched": True,
-        "panorama_key": panorama_key(capture_id),
-        "width": w,
-        "height": h,
-        "photos_used": used,
-        "photos_total": total,
-        "coverage_note": coverage_note,
-    })
-    log.info("%s stitch succeeded capture=%s size=%sx%s using %d of %d photos",
-             PREFIX, capture_id, w, h, used, total)
+    _finish_and_publish(mc, capture_id, fallback_pano, None, ring,
+                        used=total, total=total)
 
 
 def decode_bytes_to_bgr(raw: bytes):
