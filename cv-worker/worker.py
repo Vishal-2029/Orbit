@@ -26,6 +26,7 @@ from ops.normalize import (
     resize_to_width,
 )
 from ops.stitch import stitch_panorama
+from ops.tiles import cut_tiles, face_size_for, levels_for
 from ops.feature_stitch import stitch_with_features
 from ops.finish import finish_panorama
 from ops.coverage import describe_leftovers, sphere_coverage
@@ -172,6 +173,12 @@ def thumb_key(capture_id, idx):
 
 def panorama_key(capture_id):
     return f"captures/{capture_id}/panorama.jpg"
+
+
+def tile_key(capture_id, z, face, x, y):
+    """One cube tile. Must match storage.TileKey on the Go side and the URL
+    template the manifest hands the viewer - z, face, y, then x."""
+    return f"captures/{capture_id}/tiles/{z}/{face}/{y}/{x}.jpg"
 
 
 def get_object_bytes(mc, bucket, key):
@@ -346,6 +353,39 @@ def wait_for_frames(capture_id):
     return last or {}, frames
 
 
+
+def _upload_tiles(mc, capture_id, pano):
+    """Cut the panorama into cube tiles and store them.
+
+    Entirely optional. The equirectangular JPEG is already uploaded and the
+    viewer renders it on its own, so if any of this fails the capture is still
+    a working 360 - just one that hands the GPU a single large texture instead
+    of only the pieces on screen. That is why every error here is swallowed and
+    reported as "no tiles" rather than failing the capture.
+
+    Returns the manifest fields, or None.
+    """
+    if not settings.generate_tiles:
+        return None
+    try:
+        face = face_size_for(pano.shape[1])
+        levels = levels_for(face)
+        count = 0
+        for z, f, x, y, tile in cut_tiles(pano, face_size=face):
+            put_object_bytes(mc, settings.bucket_public,
+                             tile_key(capture_id, z, f, x, y),
+                             encode_jpeg(tile, settings.jpeg_quality))
+            count += 1
+        log.info("%s capture=%s: stored %d cube tiles (face %dpx, %d levels)",
+                 PREFIX, capture_id, count, face, len(levels))
+        return {"face_size": face, "tile_levels": levels}
+    except Exception as e:
+        log.warning("%s capture=%s: cube tiles skipped (%s: %s); the "
+                    "equirectangular panorama still works",
+                    PREFIX, capture_id, type(e).__name__, e)
+        return None
+
+
 def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
                         sphere_coverage=None, coverage_note=None):
     """Clean up a raw stitch, and either publish it or degrade honestly.
@@ -406,6 +446,10 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
         "photos_used": used, "photos_total": total,
         "coverage_note": coverage_note or describe_leftovers(total, used),
     }
+
+    tiles = _upload_tiles(mc, capture_id, pano)
+    if tiles:
+        body.update(tiles)
     if sphere_coverage is not None:
         body["sphere_coverage"] = sphere_coverage
     report_finalize(capture_id, body)

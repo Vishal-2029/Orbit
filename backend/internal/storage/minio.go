@@ -126,6 +126,16 @@ func ProcessedKey(captureID string, idx int) string {
 func ThumbKey(captureID string, idx int) string {
 	return fmt.Sprintf("captures/%s/thumb/%03d.jpg", captureID, idx)
 }
+// TileKey is one cube tile of a panorama.
+//
+// The path is what the viewer's URL template expands to, so the two have to
+// agree exactly: z is the resolution level, f the cube face letter, then y then
+// x. Getting y and x the wrong way round produces a panorama that renders but
+// is scrambled, which is a slow thing to notice.
+func TileKey(captureID string, z int, face string, x, y int) string {
+	return fmt.Sprintf("captures/%s/tiles/%d/%s/%d/%d.jpg", captureID, z, face, y, x)
+}
+
 func PanoramaKey(captureID string) string {
 	return fmt.Sprintf("captures/%s/panorama.jpg", captureID)
 }

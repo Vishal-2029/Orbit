@@ -29,6 +29,13 @@ type FinalizeInput struct {
 	// actually saw. Anything the camera never pointed at cannot be recovered,
 	// so this is the honest ceiling on how complete the 360 can look.
 	SphereCoverage float64 `json:"sphere_coverage"`
+
+	// FaceSize and TileLevels describe the cube-tile pyramid, when the worker
+	// managed to cut one. Tiles are an optimisation, not a requirement: absent
+	// these, the manifest simply points at the equirectangular JPEG and the
+	// viewer renders that instead.
+	FaceSize   int                `json:"face_size"`
+	TileLevels []domain.TileLevel `json:"tile_levels"`
 }
 
 // MinCoverage is the share of the user's photos that must make it into the
@@ -95,6 +102,13 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		m.Panorama = s.PublicURL(captureID, "panorama", 0)
 		m.Width, m.Height = in.Width, in.Height
 		m.Coverage = in.SphereCoverage
+		if len(in.TileLevels) > 0 {
+			// A URL TEMPLATE, not a URL. The viewer expands {z}, {f}, {y} and
+			// {x} per tile, so the placeholders have to survive into the
+			// manifest exactly as written and must match storage.TileKey.
+			m.Tiles = fmt.Sprintf("/api/v1/captures/%s/tiles/{z}/{f}/{y}/{x}.jpg", captureID)
+			m.Levels = in.TileLevels
+		}
 		// Photos cannot cover ground the camera never pointed at. Say how much
 		// is missing rather than letting the user wonder what the blur is.
 		if in.SphereCoverage > 0 && in.SphereCoverage < 0.9 {

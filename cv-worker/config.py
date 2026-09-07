@@ -102,6 +102,20 @@ class Settings:
     thumb_width = _envint("THUMB_WIDTH", 500)
     jpeg_quality = _envint("JPEG_QUALITY", 85)
 
+    # Cut each finished panorama into cube tiles as well as storing the single
+    # equirectangular JPEG.
+    #
+    # Worth it because an equirect has to be uploaded to the GPU as ONE texture:
+    # older phones refuse anything wider than 4096 and show a black sphere with
+    # no error, and even where it is accepted a 4096x2048 texture is 32MB of
+    # video memory held open. Tiles are fetched only where the viewer is
+    # looking, at the resolution it needs.
+    #
+    # The cost is roughly thirty extra objects per capture. Turn it off on a
+    # host where object count or storage is the binding constraint - the viewer
+    # falls back to the equirect on its own.
+    generate_tiles = _env("GENERATE_TILES", "true").lower() not in ("0", "false", "no")
+
     # Megapixels the stitcher composites at. OpenCV's default is the input
     # resolution, which is by far the worker's largest allocation: +171 MiB over
     # the loaded frames for a 16-photo ring, against +95 MiB capped to 1.2.
