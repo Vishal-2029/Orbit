@@ -16,8 +16,9 @@ import time
 import redis
 import requests
 
-from config import settings
+from config import settings, _cgroup_memory_limit_mb
 from ops.align import sort_ring_by_yaw
+from ops.budget import plan as plan_source_width
 from ops.normalize import (
     align_to_centroid,
     centroid,
@@ -478,7 +479,7 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
     return True
 
 
-def handle_finalize_job(mc, job):
+def handle_finalize_job(mc, job, attempt=1):
     capture_id = job["capture_id"]
     log.info("%s finalize job capture=%s: waiting for frames", PREFIX, capture_id)
 
@@ -508,6 +509,22 @@ def handle_finalize_job(mc, job):
     else:
         ring = sort_ring_by_yaw(done_frames)
 
+    # How big the photos may be, decided BEFORE any of them are loaded.
+    #
+    # A stitch needs every source photo resident at once, so photo count times
+    # photo size is the floor under the whole job and no later cap can claw it
+    # back. Thirty-one photos at 1600px is over 300MB before the stitcher
+    # allocates anything of its own - which is exactly how a capture ends up
+    # OOM-killed, retried, killed again, and reported as "the photos were too
+    # large to process".
+    #
+    # On a host with room this returns the stored width and changes nothing.
+    load_width, why = plan_source_width(
+        len(ring), settings.target_width_default, _cgroup_memory_limit_mb(),
+        attempt=attempt)
+    if why:
+        log.warning("%s capture=%s: %s", PREFIX, capture_id, why)
+
     # Loaded images and their source frames are kept in lockstep. If a frame
     # fails to load, dropping it from one list but not the other would attach
     # every subsequent rotation to the wrong photo.
@@ -517,6 +534,11 @@ def handle_finalize_job(mc, job):
         try:
             raw = get_object_bytes(mc, settings.bucket_public, processed_key(capture_id, f["index"]))
             img = decode_bytes_to_bgr(raw)
+            if img is not None and img.shape[1] > load_width:
+                img = resize_to_width(img, load_width)
+            # The encoded bytes are the other copy of this photo in memory, and
+            # they are no longer needed once it is decoded.
+            del raw
         except Exception as e:
             log.warning("%s capture=%s: could not load processed frame %s for stitching: %s",
                         PREFIX, capture_id, f.get("index"), e)
@@ -633,7 +655,10 @@ def process_job_with_retry(rdb, mc, job):
             if job_type == "capture.frame.process":
                 handle_frame_job(rdb, mc, job)
             elif job_type == "capture.finalize":
-                handle_finalize_job(mc, job)
+                # The attempt number reaches the job so a retry after a memory
+                # failure loads the photos smaller. Retrying at the same size
+                # fails the same way, three times, slowly.
+                handle_finalize_job(mc, job, attempt=attempt)
             else:
                 log.warning("%s unknown job type %s, dropping", PREFIX, job_type)
                 return True
