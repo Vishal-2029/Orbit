@@ -384,7 +384,7 @@ def handle_finalize_job(mc, job):
         ok, pano, reason, geom = stitch_with_poses(images, quats)
         if ok and pano is not None:
             try:
-                pano = finish_panorama(pano)
+                pano, _ = finish_panorama(pano)
             except Exception as e:
                 log.warning("%s panorama clean-up failed (%s: %s); using raw",
                             PREFIX, type(e).__name__, e)
@@ -461,7 +461,7 @@ def handle_finalize_job(mc, job):
         # The raw stitcher result is ragged and black-padded, and its two ends
         # do not meet. Clean it up before it ever becomes a sphere texture.
         try:
-            pano = finish_panorama(pano)
+            pano, _ = finish_panorama(pano)
         except Exception as e:
             # A cosmetic step must never cost us a successful stitch.
             log.warning("[orbit-worker] panorama clean-up failed (%s: %s); "
