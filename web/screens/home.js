@@ -27,6 +27,23 @@ const ScreenHome = (() => {
             <div id="errBox" class="muted" style="margin-top:8px;color:var(--bad)"></div>
           </div>
 
+          <!-- Somebody who already HAS a 360 should not have to reshoot it here.
+               A phone's Photo Sphere mode and any 360 camera both produce a
+               finished equirectangular image, and either beats a handheld ring
+               of stills. This publishes one straight to a share link. -->
+          <div class="card upload-card">
+            <div class="upload-head">
+              <div>
+                <strong>Already have a 360 photo?</strong>
+                <p class="muted">Upload one from a 360 camera, or from your phone's
+                   Photo Sphere mode, and get a share link straight away.</p>
+              </div>
+            </div>
+            <input id="panoFile" type="file" accept="image/jpeg,image/png" hidden />
+            <button id="panoBtn" style="width:100%">Choose a 360 photo</button>
+            <div id="panoErr" class="upload-err" hidden></div>
+          </div>
+
           <h3 class="muted" style="margin:22px 0 8px">Previous captures</h3>
           <div id="captureList" class="capture-list"><p class="muted">Loading…</p></div>
         </div>
@@ -53,6 +70,34 @@ const ScreenHome = (() => {
       } catch (e) {
         errBox.textContent = "Could not start capture: " + e.message;
         startBtn.disabled = false;
+      }
+    });
+
+    // --- upload an existing panorama ---
+    const panoFile = app.querySelector("#panoFile");
+    const panoBtn = app.querySelector("#panoBtn");
+    const panoErr = app.querySelector("#panoErr");
+
+    panoBtn.addEventListener("click", () => panoFile.click());
+
+    panoFile.addEventListener("change", async () => {
+      const file = panoFile.files && panoFile.files[0];
+      if (!file) return;
+      panoErr.hidden = true;
+      panoBtn.disabled = true;
+      panoBtn.textContent = "Uploading…";
+      try {
+        const title = app.querySelector("#titleInput").value.trim() || file.name.replace(/\.[^.]+$/, "");
+        const res = await OrbitAPI.uploadPanorama(title, file);
+        Router.navigate(`#/view-id/${res.capture.id}`);
+      } catch (e) {
+        // The server's refusals explain what the image actually was and what to
+        // use instead, so they are shown as written rather than summarised.
+        panoErr.textContent = e.message;
+        panoErr.hidden = false;
+        panoBtn.disabled = false;
+        panoBtn.textContent = "Choose a 360 photo";
+        panoFile.value = "";
       }
     });
 
