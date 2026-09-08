@@ -76,6 +76,89 @@ const ScreenCapture = (() => {
       errBox.classList.add("warn");
     }
 
+    // Hold one exposure and one white balance for the whole ring.
+    //
+    // This is the single most visible thing that separates a home-made 360 from
+    // a real one. A phone re-meters every shot: point at a window and it stops
+    // down, point at a wall and it opens up, and each photo arrives at a
+    // different brightness and a different colour. Measured on a finished
+    // panorama, the sky - which is one continuous thing in the real world -
+    // swung 78 levels out of 255 between neighbouring photos, where anything
+    // over about 4 is visible. That is the vertical banding.
+    //
+    // The stitcher already tries to correct it, but it can only apply one gain
+    // per photo. That cannot undo a colour shift, and it cannot recover a
+    // window that was blown out in one frame and correctly exposed in the next.
+    // The fix has to happen here, before the photo is taken.
+    //
+    // Locked a moment AFTER the camera starts, deliberately: locking instantly
+    // freezes whatever the sensor guessed in its first frame, which is usually
+    // too dark. Letting it settle first locks something reasonable.
+    //
+    // Android Chrome supports this. iOS Safari does not expose the controls at
+    // all, and some Android cameras only offer some of them - so every step is
+    // attempted separately and a refusal is not an error. Without it the
+    // capture still works exactly as it does today.
+    let exposureLocked = false;
+
+    async function lockExposure() {
+      const track = state.stream && state.stream.getVideoTracks()[0];
+      if (!track || !track.getCapabilities) return false;
+
+      let caps = {};
+      try {
+        caps = track.getCapabilities() || {};
+      } catch (_) {
+        return false;
+      }
+
+      // Ask for each mode only where the camera lists "manual" as supported.
+      // Requesting an unsupported mode rejects the whole applyConstraints call,
+      // which would lose the ones that WOULD have worked.
+      const wanted = [];
+      const supports = (name, value) =>
+        Array.isArray(caps[name]) && caps[name].indexOf(value) !== -1;
+
+      if (supports("exposureMode", "manual")) wanted.push({ exposureMode: "manual" });
+      if (supports("whiteBalanceMode", "manual")) wanted.push({ whiteBalanceMode: "manual" });
+      // Focus too. A refocus between shots changes the framing slightly, which
+      // the stitcher then has to absorb as a geometry error.
+      if (supports("focusMode", "manual")) wanted.push({ focusMode: "manual" });
+
+      const locked = [];
+      for (const constraint of wanted) {
+        const name = Object.keys(constraint)[0];
+        try {
+          await track.applyConstraints({ advanced: [constraint] });
+          locked.push(name);
+        } catch (_) {
+          // This camera advertised the mode but would not take it. Carry on:
+          // locking two of the three is still better than locking none.
+        }
+      }
+      exposureLocked = locked.length > 0;
+      return locked;
+    }
+
+    // Give the sensor a moment to meter the scene before freezing it.
+    //
+    // Nothing is shown on screen either way. When it works there is nothing to
+    // say, and when it does not - an iPhone, mostly - there is nothing the user
+    // can do about it, so a warning would only be noise during the one part of
+    // this app where the screen is already busy. The console line is for
+    // whoever is debugging a banded panorama later.
+    setTimeout(() => {
+      lockExposure().then((locked) => {
+        // Name what actually locked, not what was asked for. Some cameras take
+        // exposure but refuse white balance, and a line claiming all three
+        // would send the next person debugging a banded panorama the wrong way.
+        console.log(locked.length
+          ? "[orbit] locked for this capture: " + locked.join(", ")
+          : "[orbit] this camera will not lock exposure; brightness may vary "
+            + "between photos, which shows as vertical bands in the panorama");
+      });
+    }, 1200);
+
     // --- orientation ---
     const tracker = Orientation.create();
     let refFrame = null;        // reference frame, locked when Front is taken
@@ -505,9 +588,18 @@ const ScreenCapture = (() => {
       // The circle has to be closed. Letting someone build a 360 with a hole in
       // it and only telling them afterwards is how this went wrong before.
       finishBtn.disabled = ringLeft > 0 || short > 0;
-      finishBtn.textContent = ringLeft > 0
-        ? `${ringLeft} more to close the circle`
-        : "Build my 360 →";
+      // Three states, not two. ringLeft only counts the horizon, so in sphere
+      // mode - where the rings above and below are required as well - the
+      // button used to read "Build my 360" while staying greyed out the moment
+      // the circle closed, with nothing on it saying what was still missing.
+      if (ringLeft > 0) {
+        finishBtn.textContent = `${ringLeft} more to close the circle`;
+      } else if (short > 0) {
+        finishBtn.textContent =
+          `${short} more above and below`;
+      } else {
+        finishBtn.textContent = "Build my 360 →";
+      }
       retakeBtn.disabled = state.shots.size === 0;
 
       // Closing the ring is not the same as covering the sphere. Anything above

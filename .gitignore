@@ -19,3 +19,6 @@ scripts/realtest/
 
 backend/.env
 
+
+# Local worker credentials, never committed.
+scripts/worker.env

@@ -229,24 +229,41 @@ func TestProgressReachesHundredOnlyWhenDone(t *testing.T) {
 func TestFullSpherePlanCoversTheWholeSphere(t *testing.T) {
 	p := FullSpherePlan(30)
 
-	// The horizon ring is compulsory; the sky and floor rings are not.
-	horizon := 0
+	// EVERY slot is compulsory in this mode, poles included.
+	//
+	// This used to require only the horizon ring. A sphere is 180 degrees tall
+	// and one ring of portrait photos covers about 81 of them, so people
+	// finished after nine shots and got a panorama that was 55% invented -
+	// the worker's soft grey "nobody photographed here" fill - with no error
+	// anywhere to explain it. Somebody who only wants the horizon strip should
+	// use pano mode, which is what that mode is for.
+	if p.MinRequired != len(p.Slots) {
+		t.Errorf("MinRequired = %d, want %d (all of them - this is a SPHERE)",
+			p.MinRequired, len(p.Slots))
+	}
 	for _, s := range p.Slots {
-		if s.Pitch == 0 {
-			horizon++
+		if !s.Required {
+			t.Errorf("slot %q (pitch %.0f) must be required in sphere mode",
+				s.ID, s.Pitch)
 		}
 	}
-	if p.MinRequired != horizon {
-		t.Errorf("MinRequired = %d, want %d (the whole horizon ring)",
-			p.MinRequired, horizon)
-	}
+
+	// And the required set must actually reach the poles, not just ring the
+	// horizon: that is the whole difference between a sphere and a strip.
+	var lowest, highest float64
 	for _, s := range p.Slots {
-		if s.Pitch == 0 && !s.Required {
-			t.Errorf("horizon shot %q must be required", s.ID)
+		if s.Required {
+			if s.Pitch < lowest {
+				lowest = s.Pitch
+			}
+			if s.Pitch > highest {
+				highest = s.Pitch
+			}
 		}
-		if s.Pitch != 0 && s.Required {
-			t.Errorf("off-horizon shot %q must be optional", s.ID)
-		}
+	}
+	if highest < 80 || lowest > -80 {
+		t.Errorf("required shots span %.0f to %.0f degrees; a sphere needs to "+
+			"reach both poles", lowest, highest)
 	}
 
 	// Every direction must be reachable: three pitch rings plus both poles.

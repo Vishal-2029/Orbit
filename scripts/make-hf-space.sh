@@ -58,6 +58,59 @@ Configure `REDIS_URL`, `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`,
 Settings > Variables and secrets.
 EOF
 
-echo "Space files written to: $OUT"
-echo "Next: cd '$OUT' && git init && git add -A && git commit -m 'orbit cv worker'"
-echo "      git remote add origin https://huggingface.co/spaces/<user>/<space> && git push -u origin main"
+# A git repo, ready to push. The script stops short of pushing because that
+# needs the operator's own Hugging Face credentials, and the remote is theirs to
+# name - but everything up to that point is done here rather than left as a list
+# of commands to retype.
+if [ ! -d "$OUT/.git" ]; then
+	git -C "$OUT" init -q
+fi
+cat > "$OUT/.gitignore" <<'EOF'
+__pycache__/
+*.pyc
+.venv/
+EOF
+git -C "$OUT" add -A
+if ! git -C "$OUT" diff --cached --quiet; then
+	git -C "$OUT" -c user.email=orbit@local -c user.name=orbit 		commit -q -m "orbit cv worker"
+fi
+
+cat <<NEXT
+
+Space assembled and committed in:
+  $OUT
+
+Why a Space: the worker needs memory. A stitch holds every source photo at once,
+so a 30-photo capture wants well over a gigabyte, and a 512MB instance shared
+with the API cannot do it at any setting. A free Space has 16GB.
+
+To publish it:
+
+  1. huggingface.co > New Space > SDK "Docker", hardware "CPU basic (free)"
+
+  2. cd $OUT
+     git remote add origin https://huggingface.co/spaces/<user>/<space>
+     git push -u origin main
+
+  3. In the Space: Settings > Variables and secrets
+
+     Secrets (not Variables - a free Space's code is public):
+       REDIS_URL           the EXTERNAL rediss:// url, with its password
+       MINIO_ACCESS_KEY
+       MINIO_SECRET_KEY
+
+     Variables:
+       MINIO_ENDPOINT      host only, no https://
+       MINIO_USE_SSL       true
+       BUCKET_PRIVATE      orbit-private
+       BUCKET_PUBLIC       orbit-public
+       API_BASE_URL        https://<your-api>.onrender.com
+
+  4. On the API service, remove the worker from the container: it should run
+     the API alone now. Redeploy.
+
+  5. Rebuild anything that failed for memory:
+       scripts/rescue-captures.py --api https://<your-api>.onrender.com --apply
+
+Full walkthrough, including the Redis and R2 setup: docs/DEPLOY-FREE.md
+NEXT

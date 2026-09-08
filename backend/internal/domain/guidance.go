@@ -125,7 +125,10 @@ func FullSpherePlan(step float64) Plan {
 	}
 	// Rings are spaced by the same rule applied to the vertical field of view.
 	// A phone held upright sees far more vertically than horizontally, so two
-	// rings either side of the horizon reach the poles with overlap to spare.
+	// rings either side of the horizon reach the poles with overlap to spare:
+	// at a 65 degree horizontal view a portrait frame spans about 81 degrees
+	// vertically, so rings at -45, 0 and +45 cover -85 to +85 with 44% overlap
+	// between neighbours, and the two pole shots close the last 5 degrees.
 	rings := []struct {
 		pitch float64
 		label string
@@ -162,17 +165,30 @@ func FullSpherePlan(step float64) Plan {
 			} else {
 				label = fmt.Sprintf("%s · %.0f°", ring.label, yaw)
 			}
-			// The horizon ring is what actually makes the 360; the upper and
-			// lower rings fill in the sky and floor.
+			// EVERY ring is required here, not just the horizon one.
+			//
+			// This mode exists to produce a full sphere, and a sphere is 180
+			// degrees tall. One ring of portrait photos covers about 81 of
+			// those - 45% - and the rest is filled by the worker with a soft
+			// grey wash meaning "nobody photographed here". Marking the upper
+			// and lower rings optional let people finish after nine shots and
+			// receive that wash as their result, with nothing having gone
+			// wrong anywhere and no error to explain it.
+			//
+			// If someone only wants the horizon strip, that is what pano mode
+			// is for.
 			add(Slot{ID: id, Icon: icon, Yaw: yaw, Pitch: ring.pitch,
 				Label: label, Hint: hint},
 				map[bool]string{true: GroupCore, false: GroupExtra}[ring.pitch == 0],
-				ring.pitch == 0)
+				true)
 		}
 	}
 
+	// The poles too. They are only a few degrees of the sphere, but they are
+	// the few degrees directly overhead and underfoot - the first place
+	// somebody looks after dragging the view up.
 	for _, s := range upDown {
-		add(s, GroupUpDown, false)
+		add(s, GroupUpDown, true)
 	}
 
 	required := 0
@@ -188,8 +204,8 @@ func FullSpherePlan(step float64) Plan {
 		Tips: []string{
 			"Stand still and turn on the spot. Do not walk in a circle.",
 			fmt.Sprintf("Turn about %.0f degrees between shots, every time.", step),
-			"Finish the bright ring first - that is the 360 itself.",
-			"The dimmer dots above and below fill in the ceiling and floor.",
+			"Shoot the middle ring first, then the one above, then below.",
+			"All three rings are needed - two of them are the ceiling and floor.",
 		},
 	}
 }
