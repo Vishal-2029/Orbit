@@ -277,7 +277,13 @@ const ScreenCapture = (() => {
       // Whatever unshot dot is closest to the centre becomes the live target,
       // so the user points wherever they like rather than being marched
       // through a fixed list.
-      liveTarget = nearest;
+      // Turning towards a different dot changes which edge is shared and by how
+      // much, so the strip has to follow. Only on an actual change: this runs
+      // every frame.
+      if (nearest !== liveTarget) {
+        liveTarget = nearest;
+        updateGhost();
+      }
       if (nearest) {
         const dir = SphereMath.directionFor(refFrame, nearest.yaw, nearest.pitch || 0);
         const p = SphereMath.project(q, dir, view);
@@ -644,11 +650,58 @@ const ScreenCapture = (() => {
         return;
       }
 
-      // How much of the frame the two photos share, from the plan's own
-      // numbers rather than a guess: turn 43 degrees with a 65 degree lens and
-      // a third of the frame is common to both.
-      const step = plan.yaw_step || 43;
-      const overlap = Math.max(0.15, Math.min(0.5, (CAMERA_HFOV - step) / CAMERA_HFOV));
+      // How far the phone actually has to travel between that photo and the
+      // next one, measured - not assumed.
+      //
+      // This used to use plan.yaw_step, one number for the whole capture. It
+      // is wrong most of the time. The rings above and below the horizon step
+      // WIDER, because a circle of latitude is shorter - 43 degrees at the
+      // equator becomes 61 at 45 degrees up - so they share far less frame.
+      // And slots can be shot in any order, so the last photo is often not the
+      // neighbour of the next one at all.
+      //
+      // The result was a strip claiming an overlap that was not there: the
+      // dashed line and the blue dot disagreed, and lining up against one put
+      // the photo in the wrong place for the other.
+      // The dot the user is aiming at, not the next one in the list. They are
+      // free to point anywhere - liveTarget is whichever unshot dot is nearest
+      // the centre - so measuring against the list order would describe a turn
+      // they are not making.
+      const target = liveTarget || nextSlot();
+      if (!target) {
+        ghost.style.display = "none";
+        return;
+      }
+
+      // Shortest way round, and signed: which side the ghost belongs on.
+      let dYaw = ((target.yaw - shot.yaw + 540) % 360) - 180;
+      const dPitch = (target.pitch || 0) - (shot.pitch || 0);
+
+      // A photo from a different ring does not share a clean vertical strip
+      // with this one - the common region is a corner, not an edge - so there
+      // is nothing honest to draw. Same for two slots that are simply too far
+      // apart to overlap.
+      // How much YAW one photo covers, which is not the field of view except
+      // at the horizon. Tilt up and the same angular width spans more
+      // longitude, because a circle of latitude is shorter - at 45 degrees up
+      // a 65 degree lens covers 92 degrees of yaw. That is exactly why the
+      // plan steps those rings wider, and ignoring it here made the upper and
+      // lower rings look like they shared almost nothing when they share the
+      // same third as the horizon does.
+      //
+      // Clamped, because cos goes to zero at the pole and the true answer
+      // there is "all of it".
+      const meanPitch = ((shot.pitch || 0) + (target.pitch || 0)) / 2;
+      const yawSpan = Math.min(360,
+        CAMERA_HFOV / Math.max(0.25, Math.cos(meanPitch * Math.PI / 180)));
+
+      const vfov = CAMERA_HFOV * 4 / 3;
+      const overlap = (yawSpan - Math.abs(dYaw)) / yawSpan;
+      if (Math.abs(dPitch) > vfov * 0.35 || overlap < 0.12) {
+        ghost.style.display = "none";
+        return;
+      }
+
       const keep = (100 - overlap * 100).toFixed(1);   // the part clipped away
 
       // The image stays full width and full height - it has to, or object-fit
@@ -656,16 +709,21 @@ const ScreenCapture = (() => {
       // be. clip-path hides all but the overlapping edge, and the transform
       // slides what is left to the opposite side of the screen, which is where
       // that same view will appear in the shot about to be taken.
-      const cw = (capture.settings && capture.settings.direction) !== "ccw";
-      if (cw) {
-        // Turning right: the ghost's RIGHT edge belongs at the screen's LEFT.
+      //
+      // Turning RIGHT means the target is at a greater yaw, so the shared view
+      // leaves by the left of the frame - the ghost's right edge belongs at the
+      // screen's left. Taken from the measured direction rather than from the
+      // capture's nominal setting, because a user shooting out of order can be
+      // going either way.
+      if (dYaw > 0) {
         ghost.style.clipPath = `inset(0 0 0 ${keep}%)`;
         ghost.style.transform = `translateX(-${keep}%)`;
+        ghost.dataset.side = "left";
       } else {
         ghost.style.clipPath = `inset(0 ${keep}% 0 0)`;
         ghost.style.transform = `translateX(${keep}%)`;
+        ghost.dataset.side = "right";
       }
-      ghost.dataset.side = cw ? "left" : "right";
       ghost.src = shot.url;
       ghost.style.display = "block";
     }
