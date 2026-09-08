@@ -372,7 +372,50 @@ func (s *Server) serveImage(c *fiber.Ctx) error {
 }
 
 func (s *Server) servePanorama(c *fiber.Ctx) error {
+	// ?download=1 asks the browser to save it rather than display it, and gives
+	// the file the capture's own name. Without the header every download from
+	// every capture arrives called "panorama.jpg", which is useless the moment
+	// somebody saves a second one.
+	if c.Query("download") != "" {
+		name := "360.jpg"
+		if cap, err := s.svc.Get(c.Context(), c.Params("id")); err == nil {
+			name = safeFilename(cap.Title) + ".jpg"
+		}
+		c.Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	}
 	return s.streamObject(c, s.cfg.BucketPublic, storage.PanoramaKey(c.Params("id")))
+}
+
+// safeFilename turns a user's title into something safe to put in a header and
+// on a filesystem. Titles are free text and reach this from an untrusted client,
+// so quotes, control characters and path separators all have to go - a title
+// containing a double quote would otherwise end the header value early.
+func safeFilename(title string) string {
+	out := make([]rune, 0, 60)
+	for _, r := range strings.TrimSpace(title) {
+		switch {
+		case r < 32 || r == 127:
+			// control characters, including CR and LF
+		case r == '"' || r == '\\' || r == '/' || r == ':' || r == '*' ||
+			r == '?' || r == '<' || r == '>' || r == '|':
+			out = append(out, '-')
+		case r > 126:
+			// Non-ASCII is legal in a filename but not in this header without
+			// the encoded form, and a transliteration would be worse than a
+			// dash. The extension and the rest of the title still carry it.
+			out = append(out, '-')
+		default:
+			out = append(out, r)
+		}
+		if len(out) >= 60 {
+			break
+		}
+	}
+	name := strings.Trim(strings.TrimSpace(string(out)), ".-")
+	if name == "" {
+		return "360"
+	}
+	return name
 }
 
 // serveTile hands back one cube tile.

@@ -342,6 +342,45 @@ const ScreenViewer = (() => {
         return b;
       };
 
+      // Download the flat equirectangular image. It is the file every other 360
+      // tool wants - Google Maps, Facebook, Pannellum, a VR headset - so being
+      // able to take it out of here matters more than it looks.
+      //
+      // A plain <a download> would be simpler, but it only works same-origin;
+      // the panorama is served from the API host, so the attribute is ignored
+      // and the browser navigates to the image instead of saving it. Fetching
+      // it as a blob works whatever the origin, and ?download=1 makes the
+      // server name the file after the capture.
+      if (manifest.renderer === "sphere" && manifest.panorama) {
+        mk("⭳", "Download this 360 as an image", async (b) => {
+          const was = b.textContent;
+          b.textContent = "…";
+          b.disabled = true;
+          try {
+            const url = resolveUrl(manifest.panorama) +
+              (manifest.panorama.indexOf("?") === -1 ? "?" : "&") + "download=1";
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const blob = await res.blob();
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = (manifest.title || "360").replace(/[\\/:*?"<>|]/g, "-") + ".jpg";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            // Revoked on a delay: revoking immediately can cancel the save in
+            // some browsers before it has read the blob.
+            setTimeout(() => URL.revokeObjectURL(a.href), 20000);
+            b.textContent = "✓";
+            setTimeout(() => { b.textContent = was; b.disabled = false; }, 1600);
+          } catch (e) {
+            b.textContent = "✕";
+            b.title = "Could not download: " + e.message;
+            setTimeout(() => { b.textContent = was; b.disabled = false; }, 2200);
+          }
+        });
+      }
+
       mk("−", "Zoom out", () => viewer.zoomOut());
       mk("+", "Zoom in", () => viewer.zoomIn());
       mk("↺", "Reset the view", () => viewer.resetView());
