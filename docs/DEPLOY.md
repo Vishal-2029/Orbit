@@ -81,6 +81,16 @@ docker compose up -d
 docker exec -i orbit-postgres psql -U orbit -d orbit < backend/migrations/001_init.sql
 docker exec -i orbit-postgres psql -U orbit -d orbit < backend/migrations/002_quaternion.sql
 
+> **You no longer need to do this.** The API applies every migration in
+> `backend/migrations/` at startup, from files compiled into the binary, and
+> refuses to start if one fails. The commands above are kept for setting up a
+> database by hand, or for seeing what will run.
+>
+> This changed because it was a manual step, and manual steps get missed: the
+> hotspots table was never created in production, so every hotspot request
+> returned `relation "hotspots" does not exist` while the rest of the API
+> worked normally and the health check stayed green.
+
 cd cv-worker && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ..
 ```
 

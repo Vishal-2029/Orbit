@@ -34,6 +34,17 @@ func main() {
 	}
 	defer r.Close()
 
+	// Bring the schema up to date before serving anything.
+	//
+	// Fatal on failure, deliberately. A server whose schema is behind its code
+	// does not fail cleanly - it starts, answers health checks, and returns
+	// "relation does not exist" for one feature while everything else works,
+	// which is exactly how the hotspots table stayed missing in production
+	// without anyone noticing. Refusing to start says so immediately.
+	if err := r.Migrate(boot); err != nil {
+		log.Fatalf("migrations: %v", err)
+	}
+
 	store, err := storage.NewMinIO(cfg.MinIOEndpoint, cfg.MinIOAccess, cfg.MinIOSecret,
 		cfg.MinIOUseSSL, cfg.BucketPrivate, cfg.BucketPublic)
 	if err != nil {

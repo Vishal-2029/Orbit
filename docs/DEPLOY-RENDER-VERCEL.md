@@ -124,6 +124,9 @@ Run the migrations after the database is available:
 # From a machine that has psql installed; use the Render external connection string here.
 psql "$DATABASE_URL" -f backend/migrations/001_init.sql
 psql "$DATABASE_URL" -f backend/migrations/002_quaternion.sql
+
+> Not required any more - the API runs every migration at startup and will not
+> start if one fails. Kept for inspecting or preparing a database by hand.
 ```
 
 Use the internal connection string in Render service environment variables. Never commit a database URL or password to Git.
