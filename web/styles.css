@@ -939,3 +939,73 @@ img, canvas, video { max-width: 100%; }
 .he-actions { display: flex; align-items: center; gap: 10px; }
 .he-delete { background: transparent; color: var(--bad); padding-left: 0; }
 .he-delete:hover { background: #3a1414; }
+
+/* ------------------------------------------------------------------ *
+   "Why does this look like this?"
+
+   The explanation for a degraded 360 used to be a banner across the top
+   of the view. It is worth saying - it tells someone their capture came
+   up short and how to reshoot it - but it is several lines long, and as
+   a banner it covered the picture they came to look at. A dot they can
+   tap says the same thing without standing in front of it.
+ * ------------------------------------------------------------------ */
+#degradedBanner { position: absolute; top: 64px; left: 14px; z-index: 6; }
+
+.degraded-btn {
+  width: 30px; height: 30px; padding: 0;
+  border-radius: 50%;
+  background: rgba(245, 166, 35, .92);
+  color: #2a1e05;
+  font-weight: 800; font-size: .9rem; font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .4);
+}
+.degraded-btn:hover,
+.degraded-btn:focus-visible { transform: scale(1.1); outline: none; }
+
+.degraded-note {
+  position: absolute;
+  top: calc(100% + 8px); left: 0;
+  width: min(320px, calc(100vw - 40px));
+  background: rgba(16, 20, 28, .97);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(245, 166, 35, .35);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+  padding: 13px 15px;
+}
+.degraded-note p {
+  margin: 0 0 11px;
+  font-size: .84rem; line-height: 1.5;
+  color: var(--text);
+}
+.degraded-close {
+  padding: .45em 1em;
+  font-size: .8rem; font-weight: 600;
+  background: var(--panel2);
+}
+
+/* ------------------------------------------------------------------ *
+   Upload an existing 360
+
+   Deliberately quieter than the capture card above it. Capturing is the
+   main path; this is for the person who already has a panorama from a
+   360 camera or their phone's Photo Sphere mode and would rather not
+   reshoot it.
+ * ------------------------------------------------------------------ */
+.upload-card { margin-top: 14px; }
+.upload-head strong { font-size: .95rem; }
+.upload-head p {
+  margin: 5px 0 13px;
+  font-size: .82rem; line-height: 1.5;
+}
+.upload-err {
+  margin-top: 11px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  background: #3a1414;
+  color: var(--bad);
+  font-size: .82rem; line-height: 1.5;
+}

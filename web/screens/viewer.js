@@ -53,9 +53,36 @@ const ScreenViewer = (() => {
 
     vTitle.textContent = manifest.title || "360 view";
 
+    // A small "i" button rather than a banner across the view.
+    //
+    // The message can be four lines long, and as a banner it sat across the top
+    // of the panorama covering the thing the user came to look at - on a phone,
+    // most of it. It is worth saying, but it is not worth saying over the
+    // picture, and nobody needs to read it twice.
     if (manifest.degraded) {
-      app.querySelector("#degradedBanner").innerHTML =
-        `<div class="banner warn" style="position:absolute;top:64px;left:16px;right:16px;z-index:3">${escapeHtml(manifest.degraded_why || "This view uses a fallback renderer.")}</div>`;
+      const why = manifest.degraded_why || "This view uses a fallback renderer.";
+      const host = app.querySelector("#degradedBanner");
+      host.innerHTML = `
+        <button class="degraded-btn" type="button" title="Why does this look like this?"
+                aria-label="Why does this look like this?" aria-expanded="false">i</button>
+        <div class="degraded-note" hidden>
+          <p>${escapeHtml(why)}</p>
+          <button class="degraded-close" type="button">Got it</button>
+        </div>`;
+      const btn = host.querySelector(".degraded-btn");
+      const note = host.querySelector(".degraded-note");
+      const toggle = (open) => {
+        note.hidden = !open;
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+      };
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggle(note.hidden);
+      });
+      host.querySelector(".degraded-close").addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggle(false);
+      });
     }
 
     function setShareLink(forSlug) {
