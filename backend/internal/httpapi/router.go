@@ -53,8 +53,6 @@ func NewServer(svc *service.Capture, hub *realtime.Hub, store storage.Store, cfg
 
 	v1 := app.Group("/api/v1")
 	v1.Post("/captures", s.createCapture)
-	// One already-panoramic image, published straight to a share link.
-	v1.Post("/panoramas", s.uploadPanorama)
 	v1.Get("/captures", s.listCaptures)
 	v1.Get("/captures/:id", s.getCapture)
 	v1.Patch("/captures/:id", s.patchCapture)
@@ -220,26 +218,6 @@ func (s *Server) deleteCapture(c *fiber.Ctx) error {
 
 // uploadPhoto accepts one multipart photo plus the guidance metadata that says
 // which slot it belongs to and where the phone was pointing.
-// uploadPanorama publishes an image that is already a 360, skipping capture and
-// stitching entirely. See service.CreateFromPanorama for why this exists.
-func (s *Server) uploadPanorama(c *fiber.Ctx) error {
-	fh, err := c.FormFile("panorama")
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "missing 'panorama' file field")
-	}
-	f, err := fh.Open()
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	out, err := s.svc.CreateFromPanorama(c.Context(), c.FormValue("title", ""), f, fh.Size)
-	if err != nil {
-		return err
-	}
-	return c.Status(fiber.StatusCreated).JSON(out)
-}
-
 func (s *Server) uploadPhoto(c *fiber.Ctx) error {
 	fh, err := c.FormFile("photo")
 	if err != nil {

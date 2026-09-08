@@ -79,12 +79,6 @@ const OrbitAPI = (() => {
       if (source) fd.append("orientation_source", source);
       return req("POST", `/api/v1/captures/${id}/photos`, fd, true);
     },
-    uploadPanorama(title, file) {
-      const fd = new FormData();
-      fd.append("panorama", file, file.name);
-      fd.append("title", title || "");
-      return req("POST", "/api/v1/panoramas", fd, true);
-    },
     process(id) {
       return req("POST", `/api/v1/captures/${id}/process`);
     },
