@@ -432,11 +432,107 @@ def pad_to_equirect(img, px_per_deg, equator_y=None):
 
     pad_top = max(0, -top)
     pad_bottom = max(0, (top + target_h) - h)
-    # BORDER_REPLICATE smears the top and bottom rows outward. It is not real
-    # sky or floor, but it reads as a soft vignette rather than a black void.
-    out = cv2.copyMakeBorder(img, pad_top, pad_bottom, 0, 0, cv2.BORDER_REPLICATE)
+    out = _pad_towards_pole(img, pad_top, pad_bottom)
     top += pad_top
     return out[top:top + target_h]
+
+
+def _pad_towards_pole(img, pad_top, pad_bottom):
+    """Fill the unphotographed sky and floor, converging to one colour.
+
+    This used to be cv2.BORDER_REPLICATE, which copies the edge row outward
+    unchanged. On a flat image that reads as a reasonable vignette, and it is
+    what the comment here used to claim. On a SPHERE it is badly wrong.
+
+    Every column of an equirectangular image converges to the same point at the
+    pole. So a replicated row - full of different colours, a dark railing next
+    to bright sky next to a wall - becomes hundreds of coloured wedges all
+    meeting at one point. In the viewer that is a radial starburst filling the
+    whole screen the moment anyone looks up, and it is far more distracting
+    than the missing photograph it stands in for.
+
+    The row at the pole has to be a single colour, because it IS a single
+    point. So the edge row is faded to its own average as it approaches the
+    pole. The result is a soft vignette that settles into one flat tone
+    overhead - honest about there being no photograph, and quiet enough to
+    ignore.
+
+    The fade is eased rather than linear so the join at the edge of the real
+    photo stays invisible: the first few rows barely change, and most of the
+    convergence happens out where nobody is looking.
+    """
+    if pad_top <= 0 and pad_bottom <= 0:
+        return img
+
+    h, w = img.shape[:2]
+    parts = []
+
+    def band(row, n):
+        """n rows running from `row` to a single flat colour at the pole.
+
+        Two things happen together, and both are needed.
+
+        Fading to the average alone still leaves streaks: halfway through the
+        band the row is half its original self, so every colour difference
+        along it is still there, just fainter - and on the sphere those
+        differences are still wedges converging on a point.
+
+        So the row is also BLURRED horizontally, by more and more as it
+        approaches the pole. A streak is horizontal variation by definition, so
+        blurring it away is the direct fix rather than a cosmetic one. By the
+        last row the blur is wider than the image and nothing survives but the
+        average, which is exactly what a single point should look like.
+        """
+        # A trimmed mean, so one bright window or dark doorway in the edge row
+        # does not drag the whole sky towards it.
+        flat = np.sort(row.reshape(-1, row.shape[-1]), axis=0)
+        lo, hi = int(len(flat) * 0.1), int(len(flat) * 0.9)
+        target = (flat[lo:hi].mean(axis=0) if hi > lo
+                  else row.reshape(-1, row.shape[-1]).mean(axis=0))
+
+        out = np.empty((n, w, row.shape[-1]), np.float32)
+        base = row.astype(np.float32).reshape(1, w, -1)
+
+        # Blur is applied at a handful of widths and interpolated between,
+        # because blurring every row separately on a 4096-wide panorama is
+        # thousands of convolutions for a part of the image nobody studies.
+        steps = 12
+        widths = np.linspace(0, 1, steps) ** 1.6      # gentle at first
+        # The blur has to wrap, or the two ends of the panorama drift apart and
+        # reintroduce the seam this module spends its time closing. OpenCV
+        # refuses BORDER_WRAP on a column filter, so the row is tiled three
+        # times and the middle copy taken back afterwards.
+        wide = np.hstack([base, base, base])
+        cache = []
+        for f in widths:
+            sigma = f * w / 6.0
+            if sigma < 0.6:
+                cache.append(base)
+                continue
+            b = cv2.GaussianBlur(wide, (0, 0), sigmaX=sigma, sigmaY=0,
+                                 borderType=cv2.BORDER_REPLICATE)
+            cache.append(b[:, w:2 * w])
+
+        for i in range(n):
+            t = i / max(1, n - 1)
+            k = t * (steps - 1)
+            a, b = int(k), min(steps - 1, int(k) + 1)
+            blurred = cache[a] * (1 - (k - a)) + cache[b] * (k - a)
+            # And fade what is left towards the flat colour.
+            m = t * t * (3.0 - 2.0 * t)
+            out[i] = blurred[0] * (1 - m) + target.reshape(1, -1) * m
+
+        return np.clip(out, 0, 255).astype(img.dtype)
+
+    if pad_top > 0:
+        # Reversed: the row nearest the photo is closest to it, and the row at
+        # the top of the canvas - the zenith - is the flat colour.
+        parts.append(band(img[0], pad_top)[::-1])
+    parts.append(img)
+    if pad_bottom > 0:
+        parts.append(band(img[-1], pad_bottom))
+
+    return np.vstack(parts)
 
 
 def finish_panorama(pano, circumference_px=None, equator_y=None,
