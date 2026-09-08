@@ -250,26 +250,22 @@ func (s *Server) uploadPhoto(c *fiber.Ctx) error {
 		}
 	}
 
-	frame, err := s.svc.AddPhoto(c.Context(), c.Params("id"), service.UploadInput{
+	frame, note, err := s.svc.AddPhoto(c.Context(), c.Params("id"), service.UploadInput{
 		Index: idx, SlotID: c.FormValue("slot_id", ""), Yaw: yaw, Pitch: pitch,
 		HasHeading: hasHeading, Quat: quat,
 		OrientationSource: c.FormValue("orientation_source", ""),
 		Body:              f, Size: fh.Size, CType: fh.Header.Get("Content-Type"),
 	})
-	// A photo pointing the same way as one we already have is a user mistake
-	// with a specific fix, so it gets its own status and a structured body.
-	var dup *service.DuplicateDirectionError
-	if errors.As(err, &dup) {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error":         dup.Message,
-			"code":          "duplicate_direction",
-			"clash_index":   dup.ClashIndex,
-			"clash_label":   dup.ClashLabel,
-			"degrees_apart": dup.Degrees,
-		})
-	}
 	if err != nil {
 		return err
+	}
+	// A photo pointing the same way as one we already have is worth mentioning
+	// — it costs coverage — but it is stored like any other, so the note rides
+	// along with the 201 rather than replacing it with a 409.
+	if note != "" {
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"frame": frame, "warning": note, "warning_code": "duplicate_direction",
+		})
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"frame": frame})
 }

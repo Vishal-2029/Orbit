@@ -493,8 +493,8 @@ def handle_finalize_job(mc, job, attempt=1):
         report_finalize(capture_id, {"stitched": False})
         return
 
-    if len(done_frames) < 2:
-        reason = "Too few photos processed successfully to attempt a stitch."
+    if not done_frames:
+        reason = "No photo was processed successfully, so there is nothing to build from."
         log.warning("%s capture=%s: %s", PREFIX, capture_id, reason)
         report_finalize(capture_id, {"stitched": False, "failure_cause": reason})
         return
@@ -547,8 +547,8 @@ def handle_finalize_job(mc, job, attempt=1):
         loaded.append(f)
     ring = loaded
 
-    if len(images) < 2:
-        reason = "Too few processed photos could be loaded to attempt a stitch."
+    if not images:
+        reason = "No processed photo could be loaded, so there is nothing to build from."
         report_finalize(capture_id, {"stitched": False, "failure_cause": reason})
         return
 
@@ -561,7 +561,9 @@ def handle_finalize_job(mc, job, attempt=1):
     quats = [_pose_of(f) for f in ring]
     posed = sum(1 for q in quats if q is not None)
 
-    if posed >= 2 and posed >= total * 0.8:
+    # posed >= 1: a lone photo can only be placed by its rotation — feature
+    # matching needs a pair — so the pose path has to be allowed to try it.
+    if posed >= 1 and posed >= total * 0.8:
         log.info("%s capture=%s: %d of %d photos carry a usable rotation; "
                  "stitching from known poses", PREFIX, capture_id, posed, total)
         ok, pano, reason, geom = stitch_with_poses(images, quats)

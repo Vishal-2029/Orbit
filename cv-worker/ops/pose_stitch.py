@@ -186,8 +186,8 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
     Never raises.
     """
     usable = [i for i, q in enumerate(quats) if q is not None]
-    if len(usable) < 2:
-        return False, None, "Not enough photos carry camera-rotation data.", None
+    if not usable:
+        return False, None, "No photo carries camera-rotation data.", None
 
     try:
         h, w = images[usable[0]].shape[:2]
@@ -243,7 +243,12 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
                 gc.collect()
                 break
 
-        if len(warped) < 2:
+        # One is enough. A single photo placed by its recorded rotation is a
+        # real, correctly oriented piece of the sphere — the rest of the sphere
+        # is simply not photographed, which the viewer already renders as a
+        # blur rather than as an error. Requiring two here meant a one-photo
+        # capture produced nothing at all.
+        if not warped:
             return False, None, ("These photos are too large to place onto a sphere. "
                                  "Try again with fewer or smaller photos."), None
 

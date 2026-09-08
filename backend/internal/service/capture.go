@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -123,9 +124,14 @@ type UploadInput struct {
 	CType             string
 }
 
-// DuplicateDirectionError means the user shot the same way twice. It is a
-// user-fixable mistake, not a server fault, so it carries the wording the
-// client shows verbatim.
+// DuplicateDirectionError means the user shot the same way twice. It is
+// advice, not a refusal: the photo is stored either way and this rides back
+// with it as a note the client shows. It carries the wording verbatim.
+//
+// It used to reject the upload. That was wrong — it assumed the only reason to
+// shoot twice in one direction is a mistake, and so it also blocked deliberate
+// re-shoots and any capture the user meant to keep small. How many photos a
+// 360 is worth making from is the photographer's call.
 type DuplicateDirectionError struct {
 	ClashIndex int
 	ClashLabel string
@@ -135,11 +141,11 @@ type DuplicateDirectionError struct {
 
 func (e *DuplicateDirectionError) Error() string { return e.Message }
 
-// checkDirection rejects a photo pointing at a direction we already have.
+// checkDirection reports a photo pointing at a direction we already have.
 //
-// Without this the app happily accepts four photos of the same wall and then
-// fails much later, at stitch time, with a confusing message. Catching it at
-// the shutter is the only point where the user can still actually fix it.
+// Worth saying at the shutter, because that is the only point where the user
+// can still turn and re-take it, and four photos of the same wall do make a
+// poor 360. Worth only saying, though — see DuplicateDirectionError.
 func (s *Capture) checkDirection(ctx context.Context, c *domain.Capture, in UploadInput) error {
 	if !in.HasHeading {
 		return nil // no compass on this device; nothing to compare against
@@ -186,19 +192,29 @@ func (s *Capture) checkDirection(ctx context.Context, c *domain.Capture, in Uplo
 // browser CORS configuration on the object store and lets the API validate
 // the bytes. The presigned path exists on the Store interface for when the
 // frame counts get large enough to matter.
-func (s *Capture) AddPhoto(ctx context.Context, captureID string, in UploadInput) (*domain.Frame, error) {
+// The returned string is a non-fatal note about the photo just stored, empty
+// when there is nothing to say.
+func (s *Capture) AddPhoto(ctx context.Context, captureID string, in UploadInput) (*domain.Frame, string, error) {
 	c, err := s.repo.GetCapture(ctx, captureID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if c.Status != domain.StatusDraft && c.Status != domain.StatusUploading {
-		return nil, fmt.Errorf("capture is %s; photos can only be added to a draft", c.Status)
+		return nil, "", fmt.Errorf("capture is %s; photos can only be added to a draft", c.Status)
 	}
 	if in.Index < 0 || in.Index > 512 {
-		return nil, fmt.Errorf("frame index %d out of range", in.Index)
+		return nil, "", fmt.Errorf("frame index %d out of range", in.Index)
 	}
+	// Advisory only. A duplicate direction costs coverage, not correctness,
+	// and the photo is stored regardless.
+	var note string
 	if err := s.checkDirection(ctx, c, in); err != nil {
-		return nil, err
+		var dup *DuplicateDirectionError
+		if errors.As(err, &dup) {
+			note = dup.Message
+		} else {
+			return nil, "", err
+		}
 	}
 
 	key := storage.OriginalKey(captureID, in.Index)
@@ -207,7 +223,7 @@ func (s *Capture) AddPhoto(ctx context.Context, captureID string, in UploadInput
 		ct = "image/jpeg"
 	}
 	if err := s.store.Put(ctx, s.cfg.BucketPrivate, key, in.Body, in.Size, ct); err != nil {
-		return nil, fmt.Errorf("store photo: %w", err)
+		return nil, "", fmt.Errorf("store photo: %w", err)
 	}
 
 	f, err := s.repo.UpsertFrame(ctx, &domain.Frame{
@@ -217,7 +233,7 @@ func (s *Capture) AddPhoto(ctx context.Context, captureID string, in UploadInput
 		OriginalKey:       key, Status: domain.FramePending,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if c.Status == domain.StatusDraft {
 		_ = s.repo.SetCaptureStatus(ctx, captureID, domain.StatusUploading, nil)
@@ -226,7 +242,7 @@ func (s *Capture) AddPhoto(ctx context.Context, captureID string, in UploadInput
 	if err == nil {
 		_ = s.repo.SetFrameCount(ctx, captureID, n)
 	}
-	return f, nil
+	return f, note, nil
 }
 
 type framePayload struct {
@@ -250,13 +266,16 @@ func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Captur
 	if err != nil {
 		return nil, err
 	}
-	plan := s.Plan(c)
-	if len(frames) < plan.MinRequired {
-		return nil, fmt.Errorf(
-			"need %d photos to cover the whole way round, got %d. "+
-				"Each photo only sees about %.0f°, so turning further than %.0f° "+
-				"between shots leaves a gap nothing was photographed in",
-			plan.MinRequired, len(frames), domain.CameraHFOV, plan.YawStep)
+	// One photo is enough to build from. The plan's MinRequired is what it takes to
+	// cover the whole way round without a gap, and the capture screen says so
+	// while there is still time to shoot more — but it is a target, not a
+	// permission check. Refusing to build below it meant a user who wanted a
+	// partial 360, or who simply could not finish the circle, was left with
+	// nothing at all rather than with what they actually photographed. The
+	// uncovered directions come back blurred, which is a visible, honest
+	// result and better than a refusal.
+	if len(frames) == 0 {
+		return nil, fmt.Errorf("no photos to build from yet — take at least one")
 	}
 
 	// Building again over an earlier attempt has to start from a clean slate,

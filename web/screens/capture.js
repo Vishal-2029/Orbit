@@ -564,10 +564,10 @@ const ScreenCapture = (() => {
       const need = plan.min_required || 1;
       const ringLeft = ringSlots.filter((s) => !state.shots.has(s.id)).length;
 
-      // What to do next is already on screen three times over: the finish
-      // button counts the remaining shots, each dot carries its own label, and
-      // the two gauges show what is missing in each axis. A full-width banner
-      // saying it a fourth time only covered the gauges up.
+      // What to do next is already on screen three times over: the coverage
+      // note under the button says what is left, each dot carries its own
+      // label, and the two gauges show what is missing in each axis. A
+      // full-width banner saying it a fourth time only covered the gauges up.
       void t;
       void need;
       void ringLeft;
@@ -581,39 +581,34 @@ const ScreenCapture = (() => {
     }
 
     function updateFinishState() {
-      const need = plan.min_required || 4;
       const ringLeft = ringSlots.filter((s) => !state.shots.has(s.id)).length;
-      const short = Math.max(0, need - state.shots.size);
 
-      // The circle has to be closed. Letting someone build a 360 with a hole in
-      // it and only telling them afterwards is how this went wrong before.
-      finishBtn.disabled = ringLeft > 0 || short > 0;
-      // Three states, not two. ringLeft only counts the horizon, so in sphere
-      // mode - where the rings above and below are required as well - the
-      // button used to read "Build my 360" while staying greyed out the moment
-      // the circle closed, with nothing on it saying what was still missing.
-      if (ringLeft > 0) {
-        finishBtn.textContent = `${ringLeft} more to close the circle`;
-      } else if (short > 0) {
-        finishBtn.textContent =
-          `${short} more above and below`;
-      } else {
-        finishBtn.textContent = "Build my 360 →";
-      }
+      // One photo is enough to build from. The plan is a target, not a gate:
+      // it used to disable this button until the circle was closed and every
+      // ring filled, which left anyone who wanted a partial 360 - or who
+      // simply could not finish the turn - holding a set of photos they were
+      // not allowed to do anything with. What is still missing is said below,
+      // in the coverage note, where it is advice rather than a refusal.
+      finishBtn.disabled = state.shots.size === 0;
+      finishBtn.textContent =
+        state.shots.size === 0 ? "Take a photo to start" : "Build my 360 →";
       retakeBtn.disabled = state.shots.size === 0;
 
-      // Closing the ring is not the same as covering the sphere. Anything above
-      // or below that was never shot comes back as a soft blurred wash in the
-      // finished 360, because there is no photograph of it - so say so here,
-      // while it can still be fixed, rather than letting it be a surprise.
-      const off = state.slots.filter((sl) => Math.abs(sl.pitch || 0) >= 20);
-      const offLeft = off.filter((sl) => !state.shots.has(sl.id)).length;
+      // What is left to shoot, said once, in one place. Anything never
+      // photographed comes back as a soft blurred wash in the finished 360,
+      // because there is no photograph of it - so say so here, while it can
+      // still be fixed, rather than letting it be a surprise. It is the whole
+      // of the guidance now that the button no longer withholds anything.
+      const missing = state.slots.filter((sl) => !state.shots.has(sl.id)).length;
       if (coverWarn) {
-        if (ringLeft === 0 && offLeft > 0) {
-          const pct = Math.round((1 - offLeft / state.slots.length) * 100);
+        if (state.shots.size > 0 && missing > 0) {
+          const pct = Math.round((1 - missing / state.slots.length) * 100);
+          const ring = ringLeft > 0
+            ? `${ringLeft} more to close the circle. `
+            : "";
           coverWarn.textContent =
-            `${offLeft} dot${offLeft === 1 ? "" : "s"} above or below not shot ` +
-            `— about ${pct}% covered. Those directions will look blurred.`;
+            `${ring}About ${pct}% covered — you can build now, but the ` +
+            `${missing} direction${missing === 1 ? "" : "s"} not shot will look blurred.`;
           coverWarn.hidden = false;
         } else {
           coverWarn.hidden = true;
@@ -654,7 +649,7 @@ const ScreenCapture = (() => {
           quat = q;
         }
 
-        await OrbitAPI.uploadPhoto(captureId, {
+        const saved = await OrbitAPI.uploadPhoto(captureId, {
           blob, index: slot.index, slotId: slot.id,
           yaw, pitch, hasHeading: quat != null, quat,
           source: quat != null ? tracker.source : "none",
@@ -662,17 +657,22 @@ const ScreenCapture = (() => {
 
         const url = URL.createObjectURL(blob);
         state.shots.set(slot.id, { blob, url, index: slot.index, yaw, pitch, quat });
-        errBox.textContent = "";
-        errBox.classList.remove("warn");
+        // Shooting the same direction twice is worth mentioning - it spends a
+        // shot without buying any coverage - but the photo is kept, so this is
+        // a note beside a saved photo, not a rejection. It used to come back as
+        // a 409 that threw the shot away.
+        if (saved && saved.warning) {
+          errBox.classList.add("warn");
+          errBox.innerHTML =
+            `<strong>Same direction as before.</strong><br>${escapeHtml(saved.warning)}`;
+        } else {
+          errBox.textContent = "";
+          errBox.classList.remove("warn");
+        }
         renderThumbs(); updateFinishState(); updateGhost(); renderStatus();
       } catch (e) {
-        if (e.code === "duplicate_direction") {
-          errBox.classList.add("warn");
-          errBox.innerHTML = `<strong>Same direction as before.</strong><br>${escapeHtml(e.message)}`;
-        } else {
-          errBox.classList.remove("warn");
-          errBox.textContent = "Could not save that photo: " + e.message;
-        }
+        errBox.classList.remove("warn");
+        errBox.textContent = "Could not save that photo: " + e.message;
       } finally {
         firing = false;
         shutter.disabled = false;
