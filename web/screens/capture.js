@@ -7,6 +7,9 @@
 // positions are recomputed from the live gyroscope rotation every frame.
 const ScreenCapture = (() => {
   const AUTO_HOLD_MS = 550;      // steady time inside the reticle before firing
+  // The same figure the server plans with. If they ever disagree the ghost
+  // strip is the wrong width, which is worse than no ghost at all.
+  const CAMERA_HFOV = 65;
   const RETICLE_DEG = 8;         // how close to centre counts as "on target"
 
   async function mount(app, params) {
@@ -616,10 +619,55 @@ const ScreenCapture = (() => {
       }
     }
 
+    // Show only the STRIP of the last photo that should overlap this one.
+    //
+    // The ghost used to be the whole previous photo, faint, across the whole
+    // viewfinder. That does not help you line anything up: the part of it
+    // covering the middle of the screen shows a direction you have already
+    // turned away from, so it is just haze over the thing you are aiming at,
+    // and at the opacity needed to stay out of the way it was too faint to
+    // align against anyway.
+    //
+    // What actually matters is one edge. Turning right, the LEFT edge of the
+    // new frame shows the same wall as the RIGHT edge of the last one. Put
+    // those side by side and a few degrees of pitch error - the small up-and-
+    // down drift that leaves steps along a roofline - is obvious while it can
+    // still be fixed.
+    //
+    // So: clip the ghost to its trailing edge, slide that strip to the leading
+    // edge of the screen, and show it at an opacity you can actually judge
+    // against.
     function updateGhost() {
       const shot = [...state.shots.values()].pop();
-      if (shot) { ghost.src = shot.url; ghost.style.display = "block"; }
-      else ghost.style.display = "none";
+      if (!shot) {
+        ghost.style.display = "none";
+        return;
+      }
+
+      // How much of the frame the two photos share, from the plan's own
+      // numbers rather than a guess: turn 43 degrees with a 65 degree lens and
+      // a third of the frame is common to both.
+      const step = plan.yaw_step || 43;
+      const overlap = Math.max(0.15, Math.min(0.5, (CAMERA_HFOV - step) / CAMERA_HFOV));
+      const keep = (100 - overlap * 100).toFixed(1);   // the part clipped away
+
+      // The image stays full width and full height - it has to, or object-fit
+      // would crop it and the strip would no longer be the edge it claims to
+      // be. clip-path hides all but the overlapping edge, and the transform
+      // slides what is left to the opposite side of the screen, which is where
+      // that same view will appear in the shot about to be taken.
+      const cw = (capture.settings && capture.settings.direction) !== "ccw";
+      if (cw) {
+        // Turning right: the ghost's RIGHT edge belongs at the screen's LEFT.
+        ghost.style.clipPath = `inset(0 0 0 ${keep}%)`;
+        ghost.style.transform = `translateX(-${keep}%)`;
+      } else {
+        ghost.style.clipPath = `inset(0 ${keep}% 0 0)`;
+        ghost.style.transform = `translateX(${keep}%)`;
+      }
+      ghost.dataset.side = cw ? "left" : "right";
+      ghost.src = shot.url;
+      ghost.style.display = "block";
     }
 
     // --- capture ---
