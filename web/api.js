@@ -33,8 +33,14 @@ const OrbitAPI = (() => {
   }
 
   return {
-    createCapture(title, mode) {
-      return req("POST", "/api/v1/captures", { title, mode });
+    createCapture(title, mode, opts) {
+      const body = { title, mode };
+      // Only sent when the caller has an opinion. The field is a *bool on the
+      // server, so omitting it leaves the mode's own default in place.
+      if (opts && typeof opts.includeUpDown === "boolean") {
+        body.include_up_down = opts.includeUpDown;
+      }
+      return req("POST", "/api/v1/captures", body);
     },
     listCaptures(limit = 50, offset = 0) {
       return req("GET", `/api/v1/captures?limit=${limit}&offset=${offset}`);

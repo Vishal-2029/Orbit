@@ -111,7 +111,13 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		}
 		// Photos cannot cover ground the camera never pointed at. Say how much
 		// is missing rather than letting the user wonder what the blur is.
-		if in.SphereCoverage > 0 && in.SphereCoverage < 0.9 {
+		//
+		// Except when they chose not to shoot it. A horizontal 360 leaves the
+		// ceiling and floor out on purpose, so it always scores low here, and
+		// telling that user to "take a photo at every dot including the ceiling
+		// and floor" would be scolding them for using the mode as intended.
+		wantsPoles := c.Settings.IncludeUpDown
+		if wantsPoles && in.SphereCoverage > 0 && in.SphereCoverage < 0.9 {
 			m.Degraded = true
 			m.DegradedWhy = fmt.Sprintf(
 				"These photos cover about %.0f%% of the view around you. The soft "+

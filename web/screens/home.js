@@ -1,4 +1,11 @@
 const ScreenHome = (() => {
+  // Named here rather than inline, so a new mode cannot silently fall through
+  // to "Photosphere" the way pano and auto used to.
+  function modeLabel(mode) {
+    return { spin: "Object spin", pano: "Horizontal 360",
+             auto: "Uploaded", sphere: "Full sphere" }[mode] || "Photosphere";
+  }
+
   async function mount(app) {
     let mode = "sphere";
     app.innerHTML = `
@@ -16,6 +23,10 @@ const ScreenHome = (() => {
                 <button class="mode-btn selected" data-mode="sphere">
                   <div class="title">🌐 360 view</div>
                   <div class="desc">Stand still and turn. Dots guide you all the way round, plus ceiling and floor.</div>
+                </button>
+                <button class="mode-btn" data-mode="pano">
+                  <div class="title">↔️ Horizontal 360</div>
+                  <div class="desc">Just the circle around you — quicker, and no ceiling or floor to shoot.</div>
                 </button>
                 <button class="mode-btn" data-mode="spin">
                   <div class="title">🔄 Object spin</div>
@@ -65,7 +76,11 @@ const ScreenHome = (() => {
       const title = app.querySelector("#titleInput").value.trim() || "Untitled 360";
       startBtn.disabled = true;
       try {
-        const { capture } = await OrbitAPI.createCapture(title, mode);
+        // Horizontal-only means exactly that: no ceiling, no floor. Without
+        // saying so the mode still plans the two pole shots, and the user is
+        // asked for photos the mode exists to avoid.
+        const { capture } = await OrbitAPI.createCapture(title, mode,
+          mode === "pano" ? { includeUpDown: false } : undefined);
         Router.navigate(`#/capture/${capture.id}`);
       } catch (e) {
         errBox.textContent = "Could not start capture: " + e.message;
@@ -151,7 +166,7 @@ const ScreenHome = (() => {
         <div class="thumb" style="${thumb}"></div>
         <div class="meta">
           <div class="t">${escapeHtml(c.title)}</div>
-          <div class="s">${c.mode === "spin" ? "Object spin" : "Photosphere"} · ${new Date(c.created_at).toLocaleString()}</div>
+          <div class="s">${modeLabel(c.mode)} · ${new Date(c.created_at).toLocaleString()}</div>
         </div>
         <span class="badge ${badgeClass}">${c.status}</span>
         ${canRebuild(c) ? `<button class="row-rebuild" title="Build this 360 again from the same photos" aria-label="Build ${escapeHtml(c.title)} again">\u21bb</button>` : ""}
