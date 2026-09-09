@@ -1036,3 +1036,12 @@ img, canvas, video { max-width: 100%; }
   background: var(--panel2);
 }
 
+
+/* Auto-shoot toggle, next to the framing grid. Dimmed when off, so a glance at
+   the top bar says whether the shutter will fire by itself. */
+.auto-btn {
+  width: auto; border-radius: 10px; padding: .35em .7em;
+  font-size: 15px; font-weight: 700; line-height: 1; letter-spacing: .04em;
+  opacity: .55;
+}
+.auto-btn.active { background: rgba(255,255,255,.22); color: #fff; opacity: 1; }

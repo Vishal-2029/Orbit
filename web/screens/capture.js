@@ -61,6 +61,7 @@ const ScreenCapture = (() => {
     const retakeBtn = app.querySelector("#retakeBtn");
     const setFrontBtn = app.querySelector("#setFrontBtn");
     const gridBtn = app.querySelector("#gridBtn");
+    const autoBtn = app.querySelector("#autoBtn");
     const camGrid = app.querySelector("#camGrid");
     const levelBubble = app.querySelector("#levelBubble");
     const errBox = app.querySelector("#camErr");
@@ -196,6 +197,36 @@ const ScreenCapture = (() => {
     });
     applyGrid();
 
+    // --- auto-shoot ---
+    //
+    // On by default, because holding still and letting it fire is what keeps a
+    // frame sharp. But firing by itself is wrong for anyone who wants to choose
+    // the moment - waiting for people to walk out of shot, or shooting a dot
+    // twice on purpose. Off, the dot still turns the shutter green when it is
+    // centred; the tap is simply yours to make.
+    let autoOn = true;
+    try {
+      const saved = localStorage.getItem("orbit.autoShoot");
+      if (saved !== null) autoOn = saved === "1";
+    } catch (_) {}
+    function applyAuto() {
+      autoBtn.classList.toggle("active", autoOn);
+      autoBtn.setAttribute("aria-pressed", autoOn ? "true" : "false");
+      autoBtn.title = autoOn
+        ? "Auto: shoots when a dot is centred"
+        : "Manual: tap the shutter yourself";
+    }
+    autoBtn.addEventListener("click", () => {
+      autoOn = !autoOn;
+      // Drop a countdown already in progress, so switching to manual mid-hold
+      // cannot fire one last shot. (Not in applyAuto: that also runs at mount,
+      // before holdSlotId is declared.)
+      holdSlotId = null;
+      try { localStorage.setItem("orbit.autoShoot", autoOn ? "1" : "0"); } catch (_) {}
+      applyAuto();
+    });
+    applyAuto();
+
     setFrontBtn.addEventListener("click", () => {
       const q = tracker.quaternion;
       if (!q) return;
@@ -300,12 +331,16 @@ const ScreenCapture = (() => {
 
       // Auto-shoot: the dot must sit inside the reticle for a moment, so we
       // never fire mid-swing and get a blurred frame.
+      //
+      // In manual mode the green shutter still says "you are on target", but
+      // the countdown ring is not drawn - a ring that fills and then does
+      // nothing reads as a broken auto-shoot rather than a deliberate choice.
       if (onTarget && !firing) {
         if (holdSlotId !== onTarget.id) { holdSlotId = onTarget.id; holdSince = Date.now(); }
         const held = Date.now() - holdSince;
-        drawHoldRing(ctx, view, Math.min(1, held / AUTO_HOLD_MS));
+        if (autoOn) drawHoldRing(ctx, view, Math.min(1, held / AUTO_HOLD_MS));
         shutter.classList.add("aligned");
-        if (held >= AUTO_HOLD_MS) { holdSlotId = null; takeShot(onTarget); }
+        if (autoOn && held >= AUTO_HOLD_MS) { holdSlotId = null; takeShot(onTarget); }
       } else {
         holdSlotId = null;
         shutter.classList.toggle("aligned", false);
@@ -852,6 +887,7 @@ const ScreenCapture = (() => {
             <button class="back" onclick="location.hash='#/'" title="Back to home">←</button>
             <div class="cam-title">${escapeHtml(capture.title)}</div>
             <button id="gridBtn" class="side-btn grid-btn" title="Framing grid" aria-pressed="false">⊞</button>
+            <button id="autoBtn" class="side-btn auto-btn" title="Shoot automatically when a dot is centred" aria-pressed="false">A</button>
           </div>
 
           <div id="statusPill" class="status-pill"></div>
