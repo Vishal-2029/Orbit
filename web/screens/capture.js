@@ -2,9 +2,14 @@
 //
 // Instead of telling the user "turn right 40 degrees", each target is drawn as
 // a dot floating at a fixed direction in the world. The user moves the phone so
-// a dot falls inside the centre reticle, holds still, and the shutter fires by
-// itself. Turning the phone slides the dots across the screen because their
-// positions are recomputed from the live gyroscope rotation every frame.
+// a dot falls inside the centre reticle and presses the shutter. The shutter
+// turns green as soon as the dot is centred, so the press is a confirmation
+// rather than a guess. Turning the phone slides the dots across the screen
+// because their positions are recomputed from the live gyroscope rotation
+// every frame.
+//
+// Auto-shoot - firing on its own after a short hold - is available behind the
+// A button, but it is not the default.
 const ScreenCapture = (() => {
   const AUTO_HOLD_MS = 550;      // steady time inside the reticle before firing
   // The same figure the server plans with. If they ever disagree the ghost
@@ -199,12 +204,16 @@ const ScreenCapture = (() => {
 
     // --- auto-shoot ---
     //
-    // On by default, because holding still and letting it fire is what keeps a
-    // frame sharp. But firing by itself is wrong for anyone who wants to choose
-    // the moment - waiting for people to walk out of shot, or shooting a dot
-    // twice on purpose. Off, the dot still turns the shutter green when it is
-    // centred; the tap is simply yours to make.
-    let autoOn = true;
+    // OFF by default: you line the dot up, then press the button yourself.
+    //
+    // Firing on its own reads as the app taking the photo out of your hands -
+    // it goes off while you are still framing, and a shot you did not ask for
+    // is one you then have to undo. Manual costs one tap and the shutter is
+    // already green by the time you make it.
+    //
+    // Auto is still there behind the A button for anyone who wants to walk a
+    // ring without touching the screen; the choice is remembered.
+    let autoOn = false;
     try {
       const saved = localStorage.getItem("orbit.autoShoot");
       if (saved !== null) autoOn = saved === "1";
