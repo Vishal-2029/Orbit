@@ -405,7 +405,12 @@ func safeFilename(title string) string {
 func (s *Server) serveTile(c *fiber.Ctx) error {
 	z, errZ := strconv.Atoi(c.Params("z"))
 	y, errY := strconv.Atoi(c.Params("y"))
-	x, errX := strconv.Atoi(strings.TrimSuffix(c.Params("x.jpg"), ".jpg"))
+	// The param is "x", not "x.jpg": Fiber ends a parameter at "." and treats
+	// the rest of the segment as a literal, so the route ":x.jpg" matches
+	// "3.jpg" and hands back "3" under the name "x". Asking for "x.jpg" got an
+	// empty string, which failed Atoi and turned EVERY tile request into a 400
+	// - the viewer then had no tiles to draw and showed a black sphere.
+	x, errX := strconv.Atoi(c.Params("x"))
 	face := c.Params("f")
 	if errZ != nil || errY != nil || errX != nil ||
 		z < 0 || x < 0 || y < 0 || len(face) != 1 || !strings.Contains("fudlrb", face) {
