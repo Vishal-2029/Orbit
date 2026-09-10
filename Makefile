@@ -36,6 +36,7 @@ web: ## Serve the web client on :5173
 test: ## Run the Go, JavaScript and CV test suites
 	cd backend && go test ./...
 	node web/tests/sphere-math.test.js
+	node web/tests/gpano.test.js
 	@if [ -x cv-worker/.venv/bin/python ]; then \
 		cv-worker/.venv/bin/python cv-worker/tests/test_pose_stitch.py; \
 		cv-worker/.venv/bin/python cv-worker/tests/test_xmp.py; \

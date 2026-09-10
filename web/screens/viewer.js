@@ -361,7 +361,11 @@ const ScreenViewer = (() => {
               (manifest.panorama.indexOf("?") === -1 ? "?" : "&") + "download=1";
             const res = await fetch(url);
             if (!res.ok) throw new Error("HTTP " + res.status);
-            const blob = await res.blob();
+            // Make the saved file a valid 360 rather than a wide photo: an
+            // exact 2:1 canvas with GPano XMP, so Photos, Facebook and a
+            // headset open it as a sphere. Older panoramas are a pixel off
+            // 2:1, which is enough for a strict viewer to refuse them.
+            const blob = await GPano.prepareDownload(await res.blob());
             const a = document.createElement("a");
             a.href = URL.createObjectURL(blob);
             a.download = (manifest.title || "360").replace(/[\\/:*?"<>|]/g, "-") + ".jpg";

@@ -421,6 +421,21 @@ def pad_to_equirect(img, px_per_deg, equator_y=None):
     target_h = int(round(180.0 * px_per_deg))
     if target_h < 2:
         return img
+
+    # A 360 file must be EXACTLY two by one, and rounding alone is enough to
+    # miss it: 4093 columns against a computed 2046 rows is off by half a pixel
+    # and reads as 2.0005:1. Viewers that check - Google Photos, Facebook, a
+    # headset gallery, Photo Sphere Viewer - either refuse such a file or map it
+    # onto the sphere slightly wrong, which is what a downloaded panorama
+    # looked like. So when the computed height is within a whisker of half the
+    # width, we take half the width; an odd column is dropped first, since a
+    # 2:1 image needs an even one. A real disagreement (the width does not
+    # actually span a turn) is left alone rather than papered over.
+    if w % 2:
+        img = img[:, :w - 1]
+        w -= 1
+    if abs(target_h - w / 2.0) <= max(2.0, 0.02 * w / 2.0):
+        target_h = w // 2
     if equator_y is None:
         equator_y = h / 2.0
 
