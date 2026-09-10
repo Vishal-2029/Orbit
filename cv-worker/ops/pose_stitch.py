@@ -21,6 +21,8 @@ import cv2
 import numpy as np
 
 from config import settings
+from ops import rotation_refine
+from ops.rotation_refine import refine as refine_rotations
 
 log = logging.getLogger("orbit-worker")
 
@@ -189,7 +191,7 @@ def intrinsics(width, height, hfov_deg=DEFAULT_HFOV_DEG):
                      [0, 0, 1]], dtype=np.float32), f
 
 
-def _predicted_tile_pixels(usable, quats, K, focal, w, h):
+def _predicted_tile_pixels(rotations, K, focal, w, h):
     """How many pixels the warped tiles will occupy, without warping anything.
 
     warpRoi runs the same projection on the frame's corners only, so this costs
@@ -198,16 +200,16 @@ def _predicted_tile_pixels(usable, quats, K, focal, w, h):
     """
     warper = cv2.PyRotationWarper("spherical", focal)
     total = 0
-    for i in usable:
+    for R in rotations:
         try:
-            _, _, rw, rh = warper.warpRoi((w, h), K, camera_rotation(quats[i]))
+            _, _, rw, rh = warper.warpRoi((w, h), K, R)
         except cv2.error:
             rw, rh = w, h
         total += int(rw) * int(rh)
     return total
 
 
-def _plan_scale(usable, quats, w, h, hfov_deg, budget_px):
+def _plan_scale(rotations, w, h, hfov_deg, budget_px):
     """Shrink the whole sphere until every photo fits, rather than dropping some.
 
     The budget used to be enforced mid-loop: warp until it is exhausted, then
@@ -228,17 +230,17 @@ def _plan_scale(usable, quats, w, h, hfov_deg, budget_px):
     for _ in range(6):                       # 1, 1/2, 1/4 ... plenty of room
         sw, sh = max(1, int(w * scale)), max(1, int(h * scale))
         K, focal = intrinsics(sw, sh, hfov_deg)
-        need = _predicted_tile_pixels(usable, quats, K, focal, sw, sh)
+        need = _predicted_tile_pixels(rotations, K, focal, sw, sh)
         if need <= budget_px:
             if scale < 1.0:
                 log.info("[orbit-worker] %d photos would warp to %.0f Mpx; scaling "
                          "the sphere by %.2f to fit the %.0f Mpx budget with every "
-                         "photo kept", len(usable), need / 1e6, scale, budget_px / 1e6)
+                         "photo kept", len(rotations), need / 1e6, scale, budget_px / 1e6)
             return scale
         scale *= 0.75
     log.warning("[orbit-worker] even at %.2f scale these %d photos exceed the "
                 "tile budget; proceeding and letting the canvas guard decide",
-                scale, len(usable))
+                scale, len(rotations))
     return scale
 
 
@@ -262,8 +264,29 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         # front, because every later buffer is sized off this.
         _, full_focal = intrinsics(w, h, hfov_deg)
         scale = min(1.0, settings.pose_circumference_px / (2 * math.pi * full_focal))
+
+        # Where the phone SAYS each camera was, before the photographs get a
+        # say. Everything below - the budget prediction and the warp itself -
+        # uses these matrices rather than re-deriving them from the quaternions,
+        # so refining them refines what is actually warped.
+        rotations = [camera_rotation(quats[i]) for i in usable]
+
+        # A compass drifts a few degrees over a couple of minutes of turning,
+        # and at 4096 pixels around a degree is eleven pixels. That is what puts
+        # the same window frame in two places and leaves the blender showing
+        # both. The photos constrain their relative rotations far better than
+        # the sensor does, so they are asked - with the sensor still setting
+        # which way is up and which way is north.
+        if settings.refine_rotations and len(usable) >= 3:
+            ref_w = min(rotation_refine.WORK_WIDTH, w)
+            ref_h = max(1, int(round(h * ref_w / float(w))))
+            K_ref, _ = intrinsics(ref_w, ref_h, hfov_deg)
+            rotations, _ = refine_rotations([images[i] for i in usable],
+                                            rotations, K_ref, hfov_deg,
+                                            work_width=ref_w)
+
         # And again for the tile budget, so no photo has to be abandoned later.
-        scale *= _plan_scale(usable, quats, max(1, int(w * scale)),
+        scale *= _plan_scale(rotations, max(1, int(w * scale)),
                              max(1, int(h * scale)), hfov_deg,
                              settings.pose_tile_budget_px)
         if scale < 1.0:
@@ -277,7 +300,7 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
 
         warped, masks, corners = [], [], []
         running_px = 0
-        for i in usable:
+        for i, R in zip(usable, rotations):
             img = images[i]
             if img.shape[:2] != (h, w):
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
@@ -285,7 +308,8 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             # cancel one the warper appeared to apply; that apparent rotation
             # was the transposed camera_rotation above, and the two errors hid
             # each other.
-            R = camera_rotation(quats[i])
+            #
+            # R comes from the refined set, not from the quaternion.
 
             corner, wimg = warper.warp(img, K, R, cv2.INTER_LINEAR, cv2.BORDER_REFLECT)
             solid = np.full((h, w), 255, dtype=np.uint8)

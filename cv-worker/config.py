@@ -171,6 +171,15 @@ class Settings:
     pose_circumference_px = int(_env("POSE_CIRCUMFERENCE_PX", "0")) or (
         2560 if _cgroup_memory_limit_mb() and _cgroup_memory_limit_mb() <= 768 else 4096)
 
+    # Refine the sensor rotations against the photographs before warping.
+    #
+    # The sensor is what makes pose stitching work on a blank wall, and it is
+    # never turned off - refinement only adjusts the rotations relative to each
+    # other, within a few degrees, and keeps the sensor's gravity and heading.
+    # It costs one feature pass over downscaled copies, a few seconds for a
+    # 32-photo sphere, and it is what removes the doubled window frames.
+    refine_rotations = _env("REFINE_ROTATIONS", "").lower() not in ("0", "false", "no")
+
     # Retry / backoff
     max_attempts = _envint("MAX_ATTEMPTS", 3)
     backoff_base_seconds = _envint("BACKOFF_BASE_SECONDS", 2)
