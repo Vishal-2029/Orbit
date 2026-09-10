@@ -110,6 +110,60 @@ const ScreenCapture = (() => {
     // capture still works exactly as it does today.
     let exposureLocked = false;
 
+    // Fraction of the frame that is clipped, and how bright the brightest
+    // sample was, over everything seen since the camera opened. Sampled from a
+    // deliberately tiny canvas: this is a question about the scene as a whole,
+    // and 48x48 answers it as well as a megapixel would for a fraction of the
+    // cost on a phone.
+    const metering = { clipped: 0, peak: 0, samples: 0 };
+    const meterCanvas = document.createElement("canvas");
+    meterCanvas.width = meterCanvas.height = 48;
+
+    function sampleScene() {
+      if (!video.videoWidth) return;
+      try {
+        const c = meterCanvas.getContext("2d", { willReadFrequently: true });
+        c.drawImage(video, 0, 0, meterCanvas.width, meterCanvas.height);
+        const px = c.getImageData(0, 0, meterCanvas.width, meterCanvas.height).data;
+        let clipped = 0, peak = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          // Rec. 601 luma - close enough, and it is what the sensor meters on.
+          const y = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+          if (y >= 250) clipped++;
+          if (y > peak) peak = y;
+        }
+        metering.clipped = Math.max(metering.clipped, clipped / (px.length / 4));
+        metering.peak = Math.max(metering.peak, peak);
+        metering.samples++;
+      } catch (_) {
+        // A cross-origin or not-yet-ready video throws here. Nothing to do.
+      }
+    }
+
+    // Cleared by the teardown returned at the bottom of this screen, so it
+    // does not keep sampling a stopped video after the user navigates away.
+    const meterTimer = setInterval(sampleScene, 250);
+
+    function exposureBiasFor(caps) {
+      const range = caps.exposureCompensation;
+      if (!range || typeof range.min !== "number" || typeof range.max !== "number") {
+        return null;
+      }
+      // Under a fiftieth of the frame clipped is a lamp or a reflection, which
+      // is normal and not worth darkening the whole capture for.
+      if (metering.samples < 2 || metering.clipped < 0.02) return null;
+
+      // One stop for a blown patch, two for a wall of window. The units of
+      // exposureCompensation are EV on every implementation that reports a
+      // range, but the range itself varies, so the ask is clamped to it and
+      // then to the step the camera actually quantises to.
+      const stops = metering.clipped > 0.10 ? -2 : -1;
+      const step = range.step || 0.1;
+      let value = Math.max(range.min, Math.min(range.max, stops));
+      value = Math.round(value / step) * step;
+      return value === 0 ? null : value;
+    }
+
     async function lockExposure() {
       const track = state.stream && state.stream.getVideoTracks()[0];
       if (!track || !track.getCapabilities) return false;
@@ -128,6 +182,22 @@ const ScreenCapture = (() => {
       const supports = (name, value) =>
         Array.isArray(caps[name]) && caps[name].indexOf(value) !== -1;
 
+      // Bias the exposure DOWN before freezing it, when the scene has
+      // highlights the sensor cannot hold.
+      //
+      // Locking solved the banding, but it locks whatever the camera was
+      // metering a second after it opened - which is a wall, because that is
+      // what you are facing when you start. Meter for a wall indoors and every
+      // window clips to pure white, and clipped is gone: no exposure
+      // compensation in the stitcher can recover a pixel recorded as 255. The
+      // opposite mistake is cheap, because a dark interior still holds its
+      // detail and multi-band blending lifts it back.
+      //
+      // So the scene is sampled while the user is still aiming, and if the
+      // brightest thing seen is blowing out, the lock is taken a stop or two
+      // down. Cameras that do not offer the control simply skip this.
+      const bias = exposureBiasFor(caps);
+      if (bias !== null) wanted.push({ exposureCompensation: bias });
       if (supports("exposureMode", "manual")) wanted.push({ exposureMode: "manual" });
       if (supports("whiteBalanceMode", "manual")) wanted.push({ whiteBalanceMode: "manual" });
       // Focus too. A refocus between shots changes the framing slightly, which
@@ -156,6 +226,10 @@ const ScreenCapture = (() => {
     // can do about it, so a warning would only be noise during the one part of
     // this app where the screen is already busy. The console line is for
     // whoever is debugging a banded panorama later.
+    // Later than it was: the sampler needs a few frames to have seen anything,
+    // and the exposure it locks is only as good as what it has been shown. Two
+    // and a half seconds is still well inside the time it takes somebody to
+    // read the first instruction and line up the first dot.
     setTimeout(() => {
       lockExposure().then((locked) => {
         // Name what actually locked, not what was asked for. Some cameras take
@@ -165,8 +239,11 @@ const ScreenCapture = (() => {
           ? "[orbit] locked for this capture: " + locked.join(", ")
           : "[orbit] this camera will not lock exposure; brightness may vary "
             + "between photos, which shows as vertical bands in the panorama");
+        console.log("[orbit] metered %d frames, peak luma %d, %s%% clipped",
+                    metering.samples, Math.round(metering.peak),
+                    (metering.clipped * 100).toFixed(1));
       });
-    }, 1200);
+    }, 2500);
 
     // --- orientation ---
     const tracker = Orientation.create();
@@ -871,6 +948,7 @@ const ScreenCapture = (() => {
 
     return () => {
       cancelAnimationFrame(raf);
+      clearInterval(meterTimer);
       tracker.stop();
       if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
       state.shots.forEach((s) => URL.revokeObjectURL(s.url));
