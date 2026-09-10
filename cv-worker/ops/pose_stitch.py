@@ -65,17 +65,30 @@ def quaternion_to_matrix(x, y, z, w):
 
 
 class SphereGeometry(collections.namedtuple(
-        "SphereGeometry", "circumference_px equator_y")):
+        "SphereGeometry", "circumference_px equator_y coverage")):
     """Where the world sits in a panorama this module built.
 
     circumference_px  pixels for one full turn, i.e. 2*pi*focal
     equator_y         the row the horizon falls on
+    coverage          uint8 mask, same size as the panorama, non-zero exactly
+                      where a photograph actually landed
+
+    The mask is the important one. Finishing used to infer coverage from the
+    pixels, by calling anything near-black "no data" and anything else real.
+    That cannot tell a photographed dark corridor from unphotographed sky, and
+    it cannot see that a row is half-covered at all - which is how a row full of
+    real ceiling came to be classed as ragged and thrown away. The blender knows
+    the truth exactly, because it was handed one mask per photo, so the truth is
+    carried forward instead of being guessed at again downstream.
 
     The finishing stage cannot recover either of these from the pixels, and
     guessing them is what made a partial capture come out stretched over a whole
     sphere. They are cheap to carry, so they are carried.
     """
     __slots__ = ()
+
+
+SphereGeometry.__new__.__defaults__ = (None,)   # coverage is optional
 
 
 def _qmul(a, b):
@@ -176,6 +189,59 @@ def intrinsics(width, height, hfov_deg=DEFAULT_HFOV_DEG):
                      [0, 0, 1]], dtype=np.float32), f
 
 
+def _predicted_tile_pixels(usable, quats, K, focal, w, h):
+    """How many pixels the warped tiles will occupy, without warping anything.
+
+    warpRoi runs the same projection on the frame's corners only, so this costs
+    microseconds and answers the one question that has to be answered BEFORE the
+    first allocation: does the whole capture fit?
+    """
+    warper = cv2.PyRotationWarper("spherical", focal)
+    total = 0
+    for i in usable:
+        try:
+            _, _, rw, rh = warper.warpRoi((w, h), K, camera_rotation(quats[i]))
+        except cv2.error:
+            rw, rh = w, h
+        total += int(rw) * int(rh)
+    return total
+
+
+def _plan_scale(usable, quats, w, h, hfov_deg, budget_px):
+    """Shrink the whole sphere until every photo fits, rather than dropping some.
+
+    The budget used to be enforced mid-loop: warp until it is exhausted, then
+    break and keep whatever had been placed. Photos are ordered by yaw, so what
+    survived was an arbitrary arc, and it was arbitrary in the worst possible
+    way - a shot aimed at a pole warps to an enormous tile, because a spherical
+    projection diverges there, so the ceiling and floor frames ate the budget
+    and every photo after them in yaw order was discarded. A multi-ring capture
+    lost whole rings that way and had them fabricated back at the finish.
+
+    Dropping a photo removes part of the world permanently. Halving the
+    resolution costs detail everywhere and removes nothing. Between those two
+    the choice is not close, so the sphere is scaled to fit instead.
+
+    Returns the extra scale factor to apply to the sources (<= 1.0).
+    """
+    scale = 1.0
+    for _ in range(6):                       # 1, 1/2, 1/4 ... plenty of room
+        sw, sh = max(1, int(w * scale)), max(1, int(h * scale))
+        K, focal = intrinsics(sw, sh, hfov_deg)
+        need = _predicted_tile_pixels(usable, quats, K, focal, sw, sh)
+        if need <= budget_px:
+            if scale < 1.0:
+                log.info("[orbit-worker] %d photos would warp to %.0f Mpx; scaling "
+                         "the sphere by %.2f to fit the %.0f Mpx budget with every "
+                         "photo kept", len(usable), need / 1e6, scale, budget_px / 1e6)
+            return scale
+        scale *= 0.75
+    log.warning("[orbit-worker] even at %.2f scale these %d photos exceed the "
+                "tile budget; proceeding and letting the canvas guard decide",
+                scale, len(usable))
+    return scale
+
+
 def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
     """Project photos onto a sphere using their recorded rotations.
 
@@ -196,6 +262,10 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         # front, because every later buffer is sized off this.
         _, full_focal = intrinsics(w, h, hfov_deg)
         scale = min(1.0, settings.pose_circumference_px / (2 * math.pi * full_focal))
+        # And again for the tile budget, so no photo has to be abandoned later.
+        scale *= _plan_scale(usable, quats, max(1, int(w * scale)),
+                             max(1, int(h * scale)), hfov_deg,
+                             settings.pose_tile_budget_px)
         if scale < 1.0:
             w, h = max(1, int(w * scale)), max(1, int(h * scale))
             log.info("[orbit-worker] scaling sources by %.2f to %dx%d "
@@ -225,18 +295,19 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             masks.append(wmask)
             corners.append(corner)
 
-            # Check as we go, not after the loop. Measuring the finished list
-            # only reports how much memory was already taken - on a small
-            # instance the process is killed partway through the warping and the
-            # guard never runs at all. A photo aimed at the sky or the floor
-            # warps toward a pole, where a spherical projection stretches
-            # without bound, so a single shot can blow the budget on its own.
+            # _plan_scale already sized the sphere so the whole capture fits,
+            # so reaching this is a prediction that went wrong rather than a
+            # capture that was always too big. Stopping here still costs the
+            # user part of their world, so it is a last resort and it says so
+            # loudly - it is not the routine path it used to be.
             running_px += wimg.shape[0] * wimg.shape[1]
-            if running_px > settings.pose_tile_budget_px:
-                log.warning("[orbit-worker] warped tiles reached %.0f Mpx after %d of "
-                            "%d photos, over the %.0f Mpx budget; stopping here",
-                            running_px / 1e6, len(warped), len(usable),
-                            settings.pose_tile_budget_px / 1e6)
+            if running_px > settings.pose_tile_budget_px * 1.5:
+                log.error("[orbit-worker] warped tiles reached %.0f Mpx after %d of "
+                          "%d photos despite planning for %.0f Mpx; stopping to "
+                          "avoid an OOM kill, and this capture will be short of "
+                          "the sphere",
+                          running_px / 1e6, len(warped), len(usable),
+                          settings.pose_tile_budget_px / 1e6)
                 del warped[-1], masks[-1], corners[-1]
                 running_px -= wimg.shape[0] * wimg.shape[1]
                 del wimg, wmask
@@ -252,7 +323,7 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             return False, None, ("These photos are too large to place onto a sphere. "
                                  "Try again with fewer or smaller photos."), None
 
-        pano, _, y0 = _blend(warped, masks, corners)
+        pano, cover, _, y0 = _blend(warped, masks, corners)
         if pano is None:
             return False, None, "The photos could not be combined onto the sphere.", None
 
@@ -261,7 +332,8 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         # wide and the horizon - the ray with no vertical component - lands at
         # focal * pi/2. Subtracting the canvas origin puts that in image rows.
         geom = SphereGeometry(circumference_px=2.0 * math.pi * focal,
-                              equator_y=focal * math.pi / 2.0 - y0)
+                              equator_y=focal * math.pi / 2.0 - y0,
+                              coverage=cover)
 
         log.info("[orbit-worker] pose stitch placed %d photo(s) from recorded "
                  "rotations; one turn is %.0f px, horizon at row %.0f",
@@ -370,8 +442,10 @@ def _find_seams(warped, masks, corners):
 def _blend(warped, masks, corners):
     """Multi-band blend the warped images onto one canvas.
 
-    Returns (image, x0, y0) - the canvas origin comes back because the caller
-    needs it to say where the horizon ended up.
+    Returns (image, coverage, x0, y0). The canvas origin comes back because the
+    caller needs it to say where the horizon ended up, and the coverage mask
+    because it is the only honest record of which pixels were photographed -
+    the blended pixels themselves cannot be told apart from an unlit corner.
     """
     sizes = [(im.shape[1], im.shape[0]) for im in warped]
     x0 = min(c[0] for c in corners)
@@ -379,15 +453,26 @@ def _blend(warped, masks, corners):
     x1 = max(c[0] + s[0] for c, s in zip(corners, sizes))
     y1 = max(c[1] + s[1] for c, s in zip(corners, sizes))
     if x1 <= x0 or y1 <= y0:
-        return None, 0, 0
+        return None, None, 0, 0
     # A canvas this large means the geometry is wrong, not that the photo is
     # detailed. Refuse rather than trying to allocate gigabytes.
     if (x1 - x0) * (y1 - y0) > MAX_CANVAS_PX:
         log.warning("[orbit-worker] pose stitch canvas %dx%d is implausible; refusing",
                     x1 - x0, y1 - y0)
-        return None, 0, 0
+        return None, None, 0, 0
 
     _compensate_exposure(warped, masks, corners)
+
+    # Taken BEFORE seam finding, which erodes these masks down to one photo per
+    # pixel. What we want here is the opposite question - was this pixel seen by
+    # ANY photo - so it has to be answered while the overlaps are still intact.
+    cover = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    for mask, (cx, cy) in zip(masks, corners):
+        mh, mw = mask.shape[:2]
+        ys, xs = cy - y0, cx - x0
+        region = cover[ys:ys + mh, xs:xs + mw]
+        np.maximum(region, mask[:region.shape[0], :region.shape[1]], out=region)
+
     seamed = _find_seams(warped, masks, corners)
 
     blender = cv2.detail_MultiBandBlender()
@@ -412,4 +497,4 @@ def _blend(warped, masks, corners):
     for im, mask, corner in zip(warped, masks, corners):
         blender.feed(im.astype(np.int16), mask, corner)
     result, _ = blender.blend(None, None)
-    return cv2.convertScaleAbs(result), x0, y0
+    return cv2.convertScaleAbs(result), cover, x0, y0
