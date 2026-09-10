@@ -7,12 +7,14 @@ the Go API via its internal HTTP callbacks. See README.md for details.
 """
 import gc
 import json
+import math
 import logging
 import os
 import signal
 import sys
 import time
 
+import cv2
 import redis
 import requests
 
@@ -30,9 +32,10 @@ from ops.normalize import (
 from ops.stitch import stitch_panorama
 from ops.tiles import cut_tiles, face_size_for, levels_for
 from ops.feature_stitch import stitch_with_features
-from ops.finish import finish_panorama
+from ops.finish import MIN_SPHERE_COVERAGE, finish_panorama
 from ops.coverage import describe_leftovers, sphere_coverage
-from ops.pose_stitch import quaternion_from_heading, stitch_with_poses
+from ops.pose_stitch import (quaternion_from_heading, quaternion_to_matrix,
+                             stitch_with_poses)
 from ops.xmp import add_photosphere_metadata
 
 try:
@@ -407,8 +410,96 @@ def _upload_tiles(mc, capture_id, pano):
         return None
 
 
+# How much vertical reach a capture must have before we will call it a sphere
+# rather than a horizontal panorama. One ring of portrait photos spans about 80
+# degrees, so anything appreciably wider than that came from more than one ring.
+SPHERICAL_PITCH_SPREAD_DEG = 100.0
+
+# What a capture must actually have photographed to be published as 360x180.
+# Below these it is not a sphere, and padding it into one is the failure this
+# whole change exists to stop. The pole thresholds are deliberately short of 90:
+# the last few degrees straight overhead are a tiny solid angle and no hand-held
+# capture closes them exactly.
+MIN_PITCH_UP_DEG = 60.0
+MIN_PITCH_DOWN_DEG = -60.0
+
+
+def _pitch_of(quat):
+    """Elevation of the camera axis, in degrees, for a device quaternion."""
+    R = quaternion_to_matrix(*quat)
+    # The rear camera looks along the device's -Z; the phone's world is +Z up.
+    fz = -float(R[2][2])
+    return math.degrees(math.asin(max(-1.0, min(1.0, fz))))
+
+
+def _is_spherical_capture(quats):
+    """Did this capture actually aim at more than the horizon?
+
+    Derived from the poses rather than from a mode flag, because the existing
+    plans do not distinguish the two - FullSpherePlan and PanoPlan are both
+    ModePano - and inventing a schema field would break every capture already in
+    flight. The poses cannot lie about where the phone pointed, and a single
+    ring simply does not span this much pitch.
+    """
+    pitches = [_pitch_of(q) for q in quats if q is not None]
+    if len(pitches) < 2:
+        return False, 0.0
+    spread = max(pitches) - min(pitches)
+    return spread >= SPHERICAL_PITCH_SPREAD_DEG, spread
+
+
+def _describe_missing(holes):
+    """Turn hole rectangles into something a person can act on."""
+    if not holes:
+        return []
+    out = []
+    for hole in holes:
+        lo, hi = hole["pitch"]
+        where = ("straight overhead" if lo >= 60 else
+                 "the ceiling" if lo >= 20 else
+                 "straight down" if hi <= -60 else
+                 "the floor" if hi <= -20 else
+                 "the horizon")
+        y0, y1 = hole["yaw"]
+        out.append("%s, between %.0f and %.0f degrees round" % (where, y0, y1))
+    return out
+
+
+def _debug_dump(capture_id, name, image):
+    """Write an intermediate to ORBIT_DEBUG_DIR, if one is configured.
+
+    Looking only at the finished panorama makes it impossible to say WHERE the
+    pipeline first went wrong - a stretched ceiling looks the same whether the
+    photos were never taken, were dropped during warping, or were thrown away at
+    the finish. These are the three places that differ.
+    """
+    root = os.environ.get("ORBIT_DEBUG_DIR")
+    if not root or image is None:
+        return
+    try:
+        path = os.path.join(root, str(capture_id))
+        os.makedirs(path, exist_ok=True)
+        cv2.imwrite(os.path.join(path, name), image)
+    except Exception as e:
+        log.debug("%s debug dump %s failed: %s", PREFIX, name, e)
+
+
+def _debug_json(capture_id, name, payload):
+    root = os.environ.get("ORBIT_DEBUG_DIR")
+    if not root:
+        return
+    try:
+        path = os.path.join(root, str(capture_id))
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, name), "w") as fh:
+            json.dump(payload, fh, indent=2, default=str)
+    except Exception as e:
+        log.debug("%s debug dump %s failed: %s", PREFIX, name, e)
+
+
 def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
-                        sphere_coverage=None, coverage_note=None):
+                        sphere_coverage=None, coverage_note=None,
+                        spherical=False):
     """Clean up a raw stitch, and either publish it or degrade honestly.
 
     Returns True when a sphere was published. A False return means the capture
@@ -422,9 +513,14 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
     """
     circumference = geom.circumference_px if geom else None
     equator = geom.equator_y if geom else None
+    cover = getattr(geom, "coverage", None) if geom else None
+    _debug_dump(capture_id, "panorama_raw.jpg", pano)
+    if cover is not None:
+        _debug_dump(capture_id, "coverage.png", cover)
     try:
         pano, info = finish_panorama(pano, circumference_px=circumference,
-                                     equator_y=equator)
+                                     equator_y=equator, coverage=cover,
+                                     spherical=spherical)
     except Exception as e:
         log.warning("%s panorama clean-up failed (%s: %s); using the raw stitch",
                     PREFIX, type(e).__name__, e)
@@ -446,7 +542,51 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
         })
         return False
 
+    # A capture that claims to be 360x180 has to have BEEN 360x180. Publishing
+    # one that was not is the whole failure: the missing sky and floor come back
+    # as a blurred wash that reads as photography, so nobody can tell the
+    # difference until they look up. Saying what is missing lets the app ask for
+    # it instead.
+    if spherical and info is not None and info.sphere_coverage is not None:
+        short = (info.sphere_coverage < MIN_SPHERE_COVERAGE
+                 or (info.pitch_max_deg or 0) < MIN_PITCH_UP_DEG
+                 or (info.pitch_min_deg or 0) > MIN_PITCH_DOWN_DEG)
+        if short:
+            missing = _describe_missing(info.holes)
+            reason = (
+                "These photos cover %.0f%% of the sphere, from %.0f to %.0f "
+                "degrees of tilt. Publishing that as a full 360 would mean "
+                "inventing the parts nobody photographed. Still needed: %s."
+                % (info.sphere_coverage * 100, info.pitch_min_deg,
+                   info.pitch_max_deg,
+                   "; ".join(missing[:4]) if missing else "more of the ceiling and floor")
+            )
+            log.warning("%s capture=%s: spherical capture is incomplete "
+                        "(%.2f coverage, pitch %.0f..%.0f)", PREFIX, capture_id,
+                        info.sphere_coverage, info.pitch_min_deg, info.pitch_max_deg)
+            _debug_json(capture_id, "coverage.json", {
+                "status": "incomplete", "mode": "spherical",
+                "reason": "insufficient_coverage",
+                "sphere_coverage": info.sphere_coverage,
+                "vertical_min_deg": info.pitch_min_deg,
+                "vertical_max_deg": info.pitch_max_deg,
+                "holes": list(info.holes),
+            })
+            report_finalize(capture_id, {
+                "stitched": False, "failure_cause": reason,
+                "photos_used": used, "photos_total": total,
+                "coverage_note": reason,
+                "status": "incomplete", "mode": "spherical",
+                "reason": "insufficient_coverage",
+                "sphere_coverage": info.sphere_coverage,
+                "vertical_min_deg": info.pitch_min_deg,
+                "vertical_max_deg": info.pitch_max_deg,
+                "missing_regions": missing,
+            })
+            return False
+
     h, w = pano.shape[:2]
+    _debug_dump(capture_id, "panorama_final.jpg", pano)
     # Mark it as a photo sphere so Google Maps, Google Photos and any
     # photo-sphere viewer open it as a draggable 360 rather than a wide photo.
     pano_bytes = add_photosphere_metadata(
@@ -473,6 +613,25 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
         body.update(tiles)
     if sphere_coverage is not None:
         body["sphere_coverage"] = sphere_coverage
+    if info is not None:
+        body["mode"] = "spherical" if spherical else "horizontal"
+        body["horizontal_coverage"] = round(min(1.0, info.span_deg / 360.0), 4)
+        if info.sphere_coverage is not None:
+            # Measured from the pixels that were actually placed, which is a
+            # stricter and more useful number than the one derived from the
+            # quaternions alone - it accounts for photos that never made it in.
+            body["sphere_coverage"] = round(info.sphere_coverage, 4)
+            body["vertical_min_deg"] = round(info.pitch_min_deg, 1)
+            body["vertical_max_deg"] = round(info.pitch_max_deg, 1)
+        _debug_json(capture_id, "coverage.json", {
+            "status": "completed", "mode": body["mode"],
+            "width": w, "height": h,
+            "horizontal_coverage": body["horizontal_coverage"],
+            "sphere_coverage": body.get("sphere_coverage"),
+            "vertical_min_deg": body.get("vertical_min_deg"),
+            "vertical_max_deg": body.get("vertical_max_deg"),
+            "holes": list(info.holes),
+        })
     report_finalize(capture_id, body)
     log.info("%s stitch succeeded capture=%s size=%sx%s using %d of %d",
              PREFIX, capture_id, w, h, used, total)
@@ -564,8 +723,15 @@ def handle_finalize_job(mc, job, attempt=1):
     # posed >= 1: a lone photo can only be placed by its rotation — feature
     # matching needs a pair — so the pose path has to be allowed to try it.
     if posed >= 1 and posed >= total * 0.8:
+        spherical, spread = _is_spherical_capture(quats)
         log.info("%s capture=%s: %d of %d photos carry a usable rotation; "
-                 "stitching from known poses", PREFIX, capture_id, posed, total)
+                 "stitching from known poses (pitch spread %.0f deg -> %s mode)",
+                 PREFIX, capture_id, posed, total, spread,
+                 "spherical" if spherical else "horizontal")
+        _debug_json(capture_id, "poses.json", [
+            {"index": f.get("index"), "yaw": f.get("yaw"), "pitch": f.get("pitch"),
+             "quat": q, "camera_pitch_deg": None if q is None else round(_pitch_of(q), 2)}
+            for f, q in zip(ring, quats)])
         ok, pano, reason, geom = stitch_with_poses(images, quats)
         if ok and pano is not None:
             src_h, src_w = images[0].shape[:2]
@@ -581,7 +747,7 @@ def handle_finalize_job(mc, job, attempt=1):
             # method - carrying on after a degrade would report twice.
             _finish_and_publish(mc, capture_id, pano, geom, ring,
                                 used=posed, total=total,
-                                sphere_coverage=coverage)
+                                sphere_coverage=coverage, spherical=spherical)
             return
         log.warning("%s capture=%s: pose stitch unusable (%s); "
                     "falling back to feature matching", PREFIX, capture_id, reason)
