@@ -37,6 +37,17 @@ log = logging.getLogger("orbit-worker")
 # Anything this dark is treated as "no image data here", not as real content.
 BLACK_THRESHOLD = 10
 
+# The solid-angle fraction a capture must reach before we are willing to fill
+# in what is left. Above it the gaps are the last few degrees at the poles that
+# no hand-held capture closes, and a soft wash there is cosmetic. Below it the
+# gaps are whole regions the user never shot, and filling them is how an
+# incomplete capture came to look like a finished sphere - so it stays black and
+# the caller refuses it.
+#
+# The measurement is always taken BEFORE any filling, so this changes what the
+# picture looks like and never what the numbers say.
+MIN_SPHERE_COVERAGE = 0.85
+
 # How far short of a full turn a capture may fall and still be called a sphere.
 # A ring shot by hand rarely closes to the degree, and the wrap seam blend
 # hides a small shortfall; much more than this and the stretch is visible.
@@ -44,15 +55,29 @@ FULL_TURN_TOLERANCE_DEG = 12.0
 
 
 class PanoramaInfo(collections.namedtuple(
-        "PanoramaInfo", "span_deg px_per_deg full_turn")):
+        "PanoramaInfo",
+        "span_deg px_per_deg full_turn pitch_min_deg pitch_max_deg "
+        "sphere_coverage holes")):
     """What the finished panorama turned out to be.
 
-    span_deg    how much of a turn it actually covers, in degrees - counted
-                from the columns that hold a photo, not from the width
-    px_per_deg  horizontal scale of the finished image
-    full_turn   whether it is close enough to 360 to use as a sphere texture
+    span_deg         how much of a turn it actually covers, in degrees -
+                     counted from the columns that hold a photo, not from the
+                     width
+    px_per_deg       horizontal scale of the finished image
+    full_turn        whether it is close enough to 360 to use as a sphere
+    pitch_min_deg    lowest latitude any photograph reached, or None
+    pitch_max_deg    highest latitude any photograph reached, or None
+    sphere_coverage  solid-angle fraction of the sphere actually photographed,
+                     or None when no coverage mask was available
+    holes            [{"pitch": [lo, hi], "yaw": [lo, hi]}] regions nothing saw
+
+    The last four are only populated when a stitcher hands over its coverage
+    mask. Without one they stay None, and the caller must not claim a sphere.
     """
     __slots__ = ()
+
+
+PanoramaInfo.__new__.__defaults__ = (None, None, None, ())
 
 
 def content_mask(img):
@@ -395,6 +420,101 @@ def limit_width(img, max_width=4096):
     return cv2.resize(img, (max_width, int(h * max_width / w)), interpolation=cv2.INTER_AREA)
 
 
+def trim_empty_rows(img, coverage):
+    """Remove only the rows NOTHING was photographed in.
+
+    This is the replacement for the row-band crop, and the difference between
+    them is the whole bug. crop_black_borders kept the longest run of rows that
+    were content nearly all the way ACROSS - and on a multi-ring capture no row
+    outside the horizon ring is, because the upper ring has gaps between its
+    shots and a pole frame is a lens-shaped blob rather than a band. Every one
+    of those rows held real ceiling and real floor, and every one of them was
+    cropped off and then re-invented by the pole fade. That is the stretched,
+    washed-out sky and ground in the viewer.
+
+    A row that contains even one photographed pixel is real data and stays.
+    Only the empty margin above and below the capture comes off, and it comes
+    off purely so the canvas is not larger than it needs to be - the geometry
+    below places what remains by angle, not by where it sits in this array.
+
+    Returns (image, coverage, rows_removed_from_top).
+    """
+    rows = coverage.any(axis=1)
+    if not rows.any():
+        return img, coverage, 0
+    first = int(np.argmax(rows))
+    last = len(rows) - int(np.argmax(rows[::-1]))
+    if first == 0 and last == len(rows):
+        return img, coverage, 0
+    log.info("[orbit-worker] trimmed %d unphotographed rows off the top and %d "
+             "off the bottom", first, len(rows) - last)
+    return img[first:last], coverage[first:last], first
+
+
+def _latitudes(height, equator_y, px_per_deg):
+    """Latitude in degrees of every row, from the geometry alone."""
+    return (equator_y - np.arange(height, dtype=np.float64)) / px_per_deg
+
+
+def measure_coverage(coverage, equator_y, px_per_deg, lat_bands=12, lon_bins=24):
+    """What the capture actually saw, in angles rather than pixels.
+
+    Returns (pitch_min, pitch_max, sphere_fraction, holes). The sphere fraction
+    is solid-angle weighted - a band near the pole is a much smaller piece of
+    the world than the same number of rows at the horizon, and weighting rows
+    equally would flatter a capture that only shot the ceiling.
+    """
+    h, w = coverage.shape[:2]
+    seen = coverage > 0
+    lats = _latitudes(h, equator_y, px_per_deg)
+
+    rows = seen.any(axis=1)
+    if not rows.any():
+        return None, None, 0.0, ()
+    pitch_max = float(np.clip(lats[int(np.argmax(rows))], -90, 90))
+    pitch_min = float(np.clip(lats[len(rows) - 1 - int(np.argmax(rows[::-1]))], -90, 90))
+
+    # Solid angle: each row of the equirect covers cos(lat) of the sphere.
+    weight = np.cos(np.radians(np.clip(lats, -90, 90)))
+    per_row = seen.mean(axis=1) * weight
+    # The rows this image does not contain were not photographed either, and
+    # they are part of the sphere, so the denominator is the WHOLE sphere.
+    full = np.cos(np.radians(np.linspace(-90, 90, max(h, int(180 * px_per_deg)))))
+    fraction = float(per_row.sum() / full.sum() * (len(full) / float(h)))
+    fraction = float(np.clip(fraction, 0.0, 1.0))
+
+    # Coarse grid of what is missing, so the capture UI can name it.
+    holes = []
+    edges = np.linspace(90.0, -90.0, lat_bands + 1)
+    for b in range(lat_bands):
+        hi, lo = edges[b], edges[b + 1]
+        rows_in = np.where((lats <= hi) & (lats > lo))[0]
+        if len(rows_in) == 0:
+            holes.append({"pitch": [round(lo, 1), round(hi, 1)], "yaw": [0.0, 360.0]})
+            continue
+        band = seen[rows_in]
+        cols = np.array_split(band.any(axis=0), lon_bins)
+        missing = [i for i, c in enumerate(cols) if not c.any()]
+        for start, end in _runs(missing):
+            holes.append({
+                "pitch": [round(lo, 1), round(hi, 1)],
+                "yaw": [round(start * 360.0 / lon_bins, 1),
+                        round((end + 1) * 360.0 / lon_bins, 1)],
+            })
+    return pitch_min, pitch_max, fraction, tuple(holes)
+
+
+def _runs(indices):
+    """[1,2,3,7,8] -> [(1,3), (7,8)]"""
+    out = []
+    for i in indices:
+        if out and i == out[-1][1] + 1:
+            out[-1] = (out[-1][0], i)
+        else:
+            out.append((i, i))
+    return out
+
+
 def pad_to_equirect(img, px_per_deg, equator_y=None):
     """Give the panorama the 2:1 shape a sphere texture must have.
 
@@ -550,8 +670,56 @@ def _pad_towards_pole(img, pad_top, pad_bottom):
     return np.vstack(parts)
 
 
+def place_on_sphere(img, coverage, px_per_deg, equator_y, fabricate=True):
+    """Put the strip on a full 180-degree canvas without moving a single row.
+
+    pad_to_equirect already does the geometry: it centres the horizon and adds
+    or removes rows at the ends, so a row's latitude is fixed by equator_y and
+    the scale and nothing resamples it. What is added here is the coverage mask
+    travelling alongside, so the finished image can still say which of its
+    pixels were photographed - and `fabricate`, which decides whether the
+    unphotographed part is filled with the soft pole wash or left black.
+
+    Filling is right for a horizontal panorama, where the sky and floor were
+    never going to be there and a quiet vignette is the honest way to say so.
+    It is wrong for a capture claiming to be a full sphere: there the fill is
+    indistinguishable from a photograph at a glance, which is exactly how a
+    half-covered capture came to be published as a 360.
+    """
+    h = img.shape[0]
+    padded = pad_to_equirect(img, px_per_deg, equator_y) if fabricate else None
+
+    # Work out the same window pad_to_equirect used, so the mask lines up.
+    target_h = int(round(180.0 * px_per_deg))
+    if target_h < 2:
+        return img, coverage, equator_y
+    if img.shape[1] % 2:
+        img = img[:, :img.shape[1] - 1]
+        coverage = coverage[:, :coverage.shape[1] - 1]
+    w = img.shape[1]
+    if abs(target_h - w / 2.0) <= max(2.0, 0.02 * w / 2.0):
+        target_h = w // 2
+    top = int(round((equator_y if equator_y is not None else h / 2.0) - target_h / 2.0))
+
+    mask = np.zeros((target_h, w), dtype=np.uint8)
+    src0, src1 = max(0, top), min(h, top + target_h)
+    if src1 > src0:
+        mask[src0 - top:src1 - top] = coverage[src0:src1, :w]
+
+    if padded is None:
+        out = np.zeros((target_h, w, img.shape[2]), dtype=img.dtype)
+        if src1 > src0:
+            out[src0 - top:src1 - top] = img[src0:src1]
+    else:
+        out = padded[:, :w] if padded.shape[1] != w else padded
+        if out.shape[0] != target_h:            # rounding disagreement; trust ours
+            out = cv2.resize(out, (w, target_h), interpolation=cv2.INTER_AREA)
+    return out, mask, target_h / 2.0
+
+
 def finish_panorama(pano, circumference_px=None, equator_y=None,
-                    wrap=True, equirect=True, max_width=4096):
+                    wrap=True, equirect=True, max_width=4096,
+                    coverage=None, spherical=False):
     """Full clean-up: remove padding, size it, close the wrap, shape the sphere.
 
     Order matters. Cropping and resizing both disturb the edge columns, so the
@@ -568,11 +736,21 @@ def finish_panorama(pano, circumference_px=None, equator_y=None,
     signature exists to prevent.
     """
     known = circumference_px is not None and circumference_px > 0
+    have_mask = coverage is not None and coverage.shape[:2] == pano.shape[:2]
 
-    out, cropped = crop_black_borders(pano, rows_only=known)
-    if known and equator_y is not None and cropped:
-        # Rows came off the top; the horizon moved up with them.
-        equator_y -= _rows_removed(pano, out)
+    if have_mask:
+        # The stitcher knows exactly which pixels it photographed, so nothing
+        # here has to infer it from brightness or from how full a row looks.
+        # Only the empty margin comes off, and every photographed row survives.
+        out, coverage, removed = trim_empty_rows(pano, coverage)
+        cropped = removed > 0
+        if equator_y is not None:
+            equator_y -= removed
+    else:
+        out, cropped = crop_black_borders(pano, rows_only=known)
+        if known and equator_y is not None and cropped:
+            # Rows came off the top; the horizon moved up with them.
+            equator_y -= _rows_removed(pano, out)
 
     # How much of the turn was actually photographed, counted in columns that
     # hold something.
@@ -587,9 +765,15 @@ def finish_panorama(pano, circumference_px=None, equator_y=None,
     #
     # It has to happen here, before fill_remaining_black paints into the gaps
     # and makes every column look occupied.
-    covered_px = float(content_mask(out).any(axis=0).sum()) if known else None
+    if have_mask:
+        covered_px = float((coverage > 0).any(axis=0).sum()) if known else None
+    else:
+        covered_px = float(content_mask(out).any(axis=0).sum()) if known else None
 
-    if not cropped:
+    # A sphere must not have its gaps painted over: the wash is what made a
+    # half-covered capture look finished. In horizontal mode it stays, because
+    # there the gaps really are sky and floor nobody was ever going to shoot.
+    if not cropped and not spherical:
         out = fill_remaining_black(out)
 
     px_per_deg = (circumference_px / 360.0) if known else None
@@ -599,6 +783,9 @@ def finish_panorama(pano, circumference_px=None, equator_y=None,
         out = limit_width(out, max_width)
         if out.shape[1] != before_w:
             scale = out.shape[1] / float(before_w)
+            if have_mask:
+                coverage = cv2.resize(coverage, (out.shape[1], out.shape[0]),
+                                      interpolation=cv2.INTER_NEAREST)
             if px_per_deg is not None:
                 px_per_deg *= scale
             if equator_y is not None:
@@ -615,6 +802,8 @@ def finish_panorama(pano, circumference_px=None, equator_y=None,
                 # not exact to the pixel.
                 out, _ = _trim_wrap_overlap(
                     out, max_trim_px=int(overshoot + 0.02 * out.shape[1]))
+                if have_mask and out.shape[1] != coverage.shape[1]:
+                    coverage = coverage[:, :out.shape[1]]
             out = feather_wrap_seam(out)
         # Trimming only ever removes columns that duplicated others, so the
         # coverage measured before it still stands. A capture that overshot a
@@ -634,9 +823,38 @@ def finish_panorama(pano, circumference_px=None, equator_y=None,
                     "turn; it is not usable as a sphere texture", span)
 
     if equirect and full_turn:
-        out = pad_to_equirect(out, px_per_deg, equator_y)
+        if have_mask:
+            # Placed by geometry, with the coverage mask carried through so the
+            # angles below are measured rather than assumed. Nothing is
+            # fabricated in spherical mode: an unphotographed pole stays black
+            # and the caller decides whether that is publishable.
+            out, coverage, equator_y = place_on_sphere(
+                out, coverage, px_per_deg, equator_y, fabricate=not spherical)
+        else:
+            out = pad_to_equirect(out, px_per_deg, equator_y)
+            equator_y = out.shape[0] / 2.0
 
-    return out, PanoramaInfo(span_deg=span, px_per_deg=px_per_deg, full_turn=full_turn)
+    pitch_min = pitch_max = sphere_fraction = None
+    holes = ()
+    if have_mask and equator_y is not None:
+        pitch_min, pitch_max, sphere_fraction, holes = measure_coverage(
+            coverage, equator_y, px_per_deg)
+        log.info("[orbit-worker] coverage: %.0f%% of the sphere, pitch %.0f to "
+                 "%.0f degrees, %d hole(s)", sphere_fraction * 100,
+                 pitch_min, pitch_max, len(holes))
+
+        # Measured first, filled second. A sphere that is nearly complete gets
+        # its last few unphotographed degrees washed over so the viewer does not
+        # show a black disc overhead; one that is not stays black, because the
+        # caller is about to refuse it and a filled version would be a lie in
+        # the debug output as well as on screen.
+        if spherical and sphere_fraction >= MIN_SPHERE_COVERAGE:
+            out = fill_remaining_black(out)
+
+    return out, PanoramaInfo(span_deg=span, px_per_deg=px_per_deg,
+                             full_turn=full_turn, pitch_min_deg=pitch_min,
+                             pitch_max_deg=pitch_max,
+                             sphere_coverage=sphere_fraction, holes=holes)
 
 
 def _rows_removed(before, after):
