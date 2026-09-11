@@ -47,6 +47,43 @@ func TestRingSpacingLeavesNoGaps(t *testing.T) {
 	}
 }
 
+// Every ring must close evenly: the gap from the last dot back to the first is
+// the same as every other gap. Stepping and stopping short of 360 used to leave
+// that last gap squeezed to half the others on the rings above and below.
+func TestEveryRingClosesEvenly(t *testing.T) {
+	for _, step := range []float64{0, 30, 25} {
+		p := FullSpherePlan(step)
+		rings := map[float64][]float64{}
+		for _, s := range p.Slots {
+			if math.Abs(s.Pitch) < 90 {
+				rings[s.Pitch] = append(rings[s.Pitch], s.Yaw)
+			}
+		}
+		if len(rings) != 3 {
+			t.Fatalf("FullSpherePlan(%v): %d rings, want 3", step, len(rings))
+		}
+		for pitch, yaws := range rings {
+			want := 360.0 / float64(len(yaws))
+			for i := range yaws {
+				gap := math.Mod(yaws[(i+1)%len(yaws)]-yaws[i]+360, 360)
+				if math.Abs(gap-want) > 0.01 {
+					t.Errorf("FullSpherePlan(%v), ring at %+.0f: gap %.1f after %.1f, want %.1f",
+						step, pitch, gap, yaws[i], want)
+				}
+			}
+		}
+	}
+}
+
+// The rings above and below must share at least a third of their height with
+// the horizon ring, or a band of the sphere between them is never photographed.
+func TestRingsOverlapVertically(t *testing.T) {
+	if gapless := CameraVFOV() * (1 - OverlapFraction); 45 > gapless {
+		t.Errorf("rings 45 deg apart, but a %.0f deg tall frame only allows %.0f",
+			CameraVFOV(), gapless)
+	}
+}
+
 func TestOverlapIsAtLeastAThird(t *testing.T) {
 	overlap := CameraHFOV - GaplessStep()
 	if overlap < CameraHFOV*OverlapFraction-0.01 {

@@ -5,9 +5,38 @@ import (
 	"math"
 )
 
-// CameraHFOV is the horizontal field of view we assume a phone has, in degrees,
-// when held upright. Phones vary between roughly 60 and 70.
-const CameraHFOV = 65.0
+// CameraHFOV is the horizontal field of view of a phone held upright, in
+// degrees, across the SHORT side of the frame. Measured from a real capture's
+// overlaps at 63; phones vary between roughly 60 and 70.
+const CameraHFOV = 63.0
+
+// CameraAspect is an upright frame's height over its width. Photos come from
+// the camera's video stream, which is 16:9 - held upright, 9 wide and 16 tall.
+// This used to be taken as 4:3, which understated by a seventh how much of the
+// world above and below each shot actually sees.
+const CameraAspect = 16.0 / 9.0
+
+// CameraVFOV is how much an upright frame sees top to bottom: about 95 degrees.
+func CameraVFOV() float64 {
+	half := CameraHFOV * math.Pi / 180 / 2
+	return 2 * math.Atan(math.Tan(half)*CameraAspect) * 180 / math.Pi
+}
+
+// evenStep is the spacing that divides a full turn into whole shots without
+// ever exceeding maxStep.
+//
+// Stepping by maxStep and stopping short of 360 left the LAST gap - from the
+// final dot back round to the first - squeezed to whatever was left over: on
+// the rings above and below the horizon, 21 degrees instead of 42. That pair
+// overlapped twice as much as the rest, the ring looked uneven on screen, and
+// the user had no way to tell which spacing was the real one.
+func evenStep(maxStep float64) (step float64, n int) {
+	n = int(math.Ceil(360.0/maxStep - 1e-9))
+	if n < 1 {
+		n = 1
+	}
+	return 360.0 / float64(n), n
+}
 
 // OverlapFraction is how much of each photo must also appear in its neighbour.
 // A third is the standard rule: enough for a stitcher to find common detail,
@@ -19,7 +48,7 @@ const OverlapFraction = 1.0 / 3.0
 // that no photo covers - which appears in the finished 360 as a blurred band,
 // because there is genuinely nothing there to show.
 //
-//	65 degrees of view, a third of it overlapping  ->  turn about 43 degrees
+//	63 degrees of view, a third of it overlapping  ->  turn about 42 degrees
 func GaplessStep() float64 {
 	return CameraHFOV * (1 - OverlapFraction)
 }
@@ -123,12 +152,14 @@ func FullSpherePlan(step float64) Plan {
 	if step < 15 {
 		step = 15
 	}
+	step, _ = evenStep(step)
 	// Rings are spaced by the same rule applied to the vertical field of view.
 	// A phone held upright sees far more vertically than horizontally, so two
 	// rings either side of the horizon reach the poles with overlap to spare:
-	// at a 65 degree horizontal view a portrait frame spans about 81 degrees
-	// vertically, so rings at -45, 0 and +45 cover -85 to +85 with 44% overlap
-	// between neighbours, and the two pole shots close the last 5 degrees.
+	// at a 63 degree horizontal view a 9:16 upright frame spans about 95
+	// degrees vertically, so rings at -45, 0 and +45 cover about -92 to +92,
+	// each sharing half its height with the ring next to it, and the two pole
+	// shots close what is left directly overhead and underfoot.
 	rings := []struct {
 		pitch float64
 		label string
@@ -157,7 +188,9 @@ func FullSpherePlan(step float64) Plan {
 				ringStep = 90
 			}
 		}
-		for yaw := 0.0; yaw < 360; yaw += ringStep {
+		ringStep, count := evenStep(ringStep)
+		for k := 0; k < count; k++ {
+			yaw := float64(k) * ringStep
 			id := fmt.Sprintf("r%+.0f_%03.0f", ring.pitch, yaw)
 			label, icon, hint := ring.label, "•", "Line the dot up with the ring and hold steady."
 			if ring.pitch == 0 {
