@@ -237,12 +237,13 @@ def stitch_with_features(images, hfov_deg=DEFAULT_HFOV_DEG):
             return False, None, ("These photos are too large to place onto a sphere. "
                                  "Try again with fewer or smaller photos."), None, kept
 
-        pano, _, y0 = _blend(warped, masks, corners)
+        pano, cover, _, y0 = _blend(warped, masks, corners)
         if pano is None:
             return False, None, "The photos could not be combined onto the sphere.", None, kept
 
         geom = SphereGeometry(circumference_px=2.0 * math.pi * sphere_focal,
-                              equator_y=sphere_focal * math.pi / 2.0 - y0)
+                              equator_y=sphere_focal * math.pi / 2.0 - y0,
+                              coverage=cover)
         log.info("[orbit-worker] feature stitch placed %d of %d photos; one turn "
                  "is %.0f px, horizon at row %.0f",
                  len(warped), len(kept), geom.circumference_px, geom.equator_y)
