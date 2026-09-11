@@ -14,8 +14,14 @@ const ScreenCapture = (() => {
   const AUTO_HOLD_MS = 550;      // steady time inside the reticle before firing
   // The same figure the server plans with. If they ever disagree the ghost
   // strip is the wrong width, which is worse than no ghost at all.
-  const CAMERA_HFOV = 65;
-  const RETICLE_DEG = 8;         // how close to centre counts as "on target"
+  // The camera's view across the short side of an upright frame, measured from
+  // a real capture's overlaps. It was 65 here and in the backend's shot plan.
+  const CAMERA_HFOV = 63;
+  // Below this rotation speed the phone counts as held still, in degrees per
+  // second. A shot taken turning faster is blurred, and a stabilised video
+  // frame grabbed mid-swing is the one cropped furthest off-centre.
+  const STEADY_DEG_S = 8;
+  const RETICLE_DEG = 5;         // how close to centre counts as "on target"
 
   async function mount(app, params) {
     // The router hands screens a bare id string; accept an object too so this
@@ -80,6 +86,12 @@ const ScreenCapture = (() => {
       });
       video.srcObject = state.stream;
       await video.play().catch(() => {});
+      // Parallax is the one stitching error no software can undo: if the phone
+      // moves sideways between shots, near things and far things stop lining
+      // up. Say so once, as the camera opens, while it can still change how
+      // the photos are taken.
+      errBox.textContent = "Turn the phone around itself, not around your body — keep it over the same spot.";
+      setTimeout(() => { if (errBox.textContent.startsWith("Turn the phone")) errBox.textContent = ""; }, 6000);
     } catch (e) {
       errBox.textContent = "Camera access failed: " + e.message;
       errBox.classList.add("warn");
@@ -338,14 +350,47 @@ const ScreenCapture = (() => {
       return state.slots.find((s) => !state.shots.has(s.id)) || null;
     }
 
+    // How much of the world the SCREEN shows across its width. Not the
+    // camera's own field of view: the preview fills the screen with
+    // object-fit: cover, which crops the sides of the 9:16 video on any taller
+    // phone - about a fifth of it on a 9:20 screen. Projecting the dots with
+    // the camera's full width drew them in the wrong place and let them drift
+    // against the scene while turning, so a dot lined up in the circle did not
+    // mean the photo landed where the plan wanted it.
+    function screenHfov(w, h) {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return CAMERA_HFOV;
+      const shown = w / (vw * Math.max(w / vw, h / vh));   // share of the video's width on screen
+      return 2 * Math.atan(Math.tan(CAMERA_HFOV * Math.PI / 360) * shown) * 180 / Math.PI;
+    }
+
     function fitCanvas() {
       const r = video.getBoundingClientRect();
       const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
       if (dotCanvas.width !== w || dotCanvas.height !== h) {
         dotCanvas.width = w; dotCanvas.height = h;
       }
-      return { width: w, height: h, hfov: 65 };
+      return { width: w, height: h, hfov: screenHfov(w, h) };
     }
+
+    // How fast the phone is turning, in degrees per second, smoothed over a
+    // few frames so one jittery sensor sample does not flip it.
+    const motion = { q: null, t: 0, speed: 0 };
+    function trackMotion(q) {
+      const now = performance.now();
+      if (q && motion.q) {
+        const dt = (now - motion.t) / 1000;
+        if (dt > 0) {
+          const d = Math.abs(q[0] * motion.q[0] + q[1] * motion.q[1] +
+                             q[2] * motion.q[2] + q[3] * motion.q[3]);
+          const deg = 2 * Math.acos(Math.min(1, d)) * 180 / Math.PI;
+          motion.speed = motion.speed * 0.7 + (deg / dt) * 0.3;
+        }
+      }
+      motion.q = q ? Array.from(q) : null;
+      motion.t = now;
+    }
+    const isSteady = () => motion.speed < STEADY_DEG_S;
 
     function frameLoop() {
       raf = requestAnimationFrame(frameLoop);
@@ -354,6 +399,7 @@ const ScreenCapture = (() => {
 
       const q = tracker.quaternion;
       const live = tracker.isLive();
+      trackMotion(live ? q : null);
 
       // Level bubble comes straight from the rotation, no separate sensor.
       if (live && q) {
@@ -421,7 +467,13 @@ const ScreenCapture = (() => {
       // In manual mode the green shutter still says "you are on target", but
       // the countdown ring is not drawn - a ring that fills and then does
       // nothing reads as a broken auto-shoot rather than a deliberate choice.
-      if (onTarget && !firing) {
+      //
+      // On target is not enough: the phone must also be held still. The hold
+      // restarts whenever it moves, so the countdown only ever completes on a
+      // steady phone, and the shutter only turns green on one.
+      const steady = isSteady();
+      state.aim = { slot: onTarget, steady: steady };
+      if (onTarget && steady && !firing) {
         if (holdSlotId !== onTarget.id) { holdSlotId = onTarget.id; holdSince = Date.now(); }
         const held = Date.now() - holdSince;
         if (autoOn) drawHoldRing(ctx, view, Math.min(1, held / AUTO_HOLD_MS));
@@ -582,9 +634,18 @@ const ScreenCapture = (() => {
       c.restore();
     }
 
+    // The circle is drawn exactly as wide as "on target" is, so a dot inside it
+    // always arms the shutter and one outside it never does. A fixed 13% of
+    // the screen used to be about 7 degrees across on a phone while the
+    // tolerance was different, so the two disagreed at the edge.
+    function reticleRadius(view) {
+      const f = (view.width / 2) / Math.tan((view.hfov || CAMERA_HFOV) * Math.PI / 360);
+      return Math.max(22, f * Math.tan(RETICLE_DEG * Math.PI / 180));
+    }
+
     function drawReticle(c, view, live) {
       const cx = view.width / 2, cy = view.height / 2;
-      const r = Math.min(view.width, view.height) * 0.13;
+      const r = reticleRadius(view);
       c.save();
       c.strokeStyle = live ? "rgba(255,255,255,.85)" : "rgba(255,255,255,.3)";
       c.lineWidth = 3;
@@ -594,7 +655,7 @@ const ScreenCapture = (() => {
 
     function drawHoldRing(c, view, progress) {
       const cx = view.width / 2, cy = view.height / 2;
-      const r = Math.min(view.width, view.height) * 0.13;
+      const r = reticleRadius(view);
       c.save();
       c.strokeStyle = "#3ddc84";
       c.lineWidth = 6;
@@ -684,6 +745,14 @@ const ScreenCapture = (() => {
       } else if (!refFrame) {
         statusPill.className = "status-pill warn";
         statusPill.textContent = "Point at anything and take your first photo to begin";
+      } else if (state.nudge && Date.now() < state.nudge.until) {
+        statusPill.className = "status-pill warn";
+        statusPill.textContent = state.nudge.text;
+      } else if (state.aim && state.aim.slot && !state.aim.steady) {
+        // On the dot but still moving: the one thing standing between the
+        // user and the shot, so it is worth a word.
+        statusPill.className = "status-pill warn";
+        statusPill.textContent = "Hold still…";
       } else {
         statusPill.className = "status-pill hidden";
         statusPill.textContent = "";
@@ -816,7 +885,10 @@ const ScreenCapture = (() => {
       const yawSpan = Math.min(360,
         CAMERA_HFOV / Math.max(0.25, Math.cos(meanPitch * Math.PI / 180)));
 
-      const vfov = CAMERA_HFOV * 4 / 3;
+      // The frame's real height - 9:16 upright, not the 4:3 this assumed.
+      const aspect = video.videoWidth && video.videoHeight
+        ? video.videoHeight / video.videoWidth : 16 / 9;
+      const vfov = 2 * Math.atan(Math.tan(CAMERA_HFOV * Math.PI / 360) * aspect) * 180 / Math.PI;
       const overlap = (yawSpan - Math.abs(dYaw)) / yawSpan;
       if (Math.abs(dPitch) > vfov * 0.35 || overlap < 0.12) {
         ghost.style.display = "none";
@@ -850,12 +922,43 @@ const ScreenCapture = (() => {
     }
 
     // --- capture ---
-    function grabFrame() {
+    // A real still from the camera where the browser offers one (Android
+    // Chrome's ImageCapture), rather than a frame of the live video. Phones
+    // stabilise video by cropping a window that wanders from frame to frame, so
+    // every video frame's centre sits somewhere different - measured at up to
+    // an eighth of the frame - and the stitcher has to solve for it afterwards.
+    // A still is not cropped that way. iOS Safari has no ImageCapture and some
+    // Android cameras refuse takePhoto, so the video frame stays the fallback.
+    let imageCapture = null;   // null: not tried yet; false: unavailable
+    function stillCapture() {
+      if (imageCapture === null) {
+        const track = state.stream && state.stream.getVideoTracks()[0];
+        imageCapture = (track && typeof ImageCapture === "function")
+          ? new ImageCapture(track) : false;
+      }
+      return imageCapture || null;
+    }
+
+    function grabVideoFrame() {
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth || 1280;
       canvas.height = video.videoHeight || 720;
       canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
       return new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
+    }
+
+    async function grabFrame() {
+      const ic = stillCapture();
+      if (ic) {
+        try {
+          const blob = await ic.takePhoto();
+          if (blob && blob.size) return blob;
+        } catch (e) {
+          // Not worth paying for a failing call on every remaining shot.
+          imageCapture = false;
+        }
+      }
+      return grabVideoFrame();
     }
 
     async function takeShot(slot) {
@@ -864,8 +967,12 @@ const ScreenCapture = (() => {
       shutter.disabled = true;
       flash();
       try {
+        // The rotation is read at the shutter, before the photo arrives: a
+        // still can take a good fraction of a second, and by then the phone
+        // has moved on towards the next dot. Copied, in case the tracker
+        // updates its array in place.
+        const q = tracker.quaternion ? Array.from(tracker.quaternion) : null;
         const blob = await grabFrame();
-        const q = tracker.quaternion;
 
         // Record where the phone ACTUALLY pointed, not the angle we asked for.
         // This is the data the stitcher will eventually use as a starting pose.
@@ -914,9 +1021,27 @@ const ScreenCapture = (() => {
       f.classList.add("go");
     }
 
+    // A short message in the status pill, for a shutter press that was refused.
+    function nudge(text) {
+      state.nudge = { text: text, until: Date.now() + 1800 };
+      renderStatus();
+    }
+
     shutter.addEventListener("click", () => {
       const t = liveTarget || nextSlot();
       if (!t) return;
+      // With a working sensor a manual shot has to meet the same bar as an
+      // automatic one: on a dot, and held still. A shot fired off target or
+      // mid-swing used to be accepted and filed under the nearest dot, which
+      // is how a ring ended up with uneven gaps and blurred, off-centre
+      // frames. Without a sensor there are no dots to aim at, so it fires as
+      // it always did.
+      if (tracker.isLive()) {
+        if (!isSteady()) return nudge("Hold still…");
+        if (refFrame && !(state.aim && state.aim.slot)) {
+          return nudge("Line the blue dot up inside the circle first");
+        }
+      }
       // The first manual shot also establishes Front if it is not set yet.
       if (!refFrame && tracker.quaternion) refFrame = SphereMath.referenceFrame(tracker.quaternion);
       takeShot(t);
