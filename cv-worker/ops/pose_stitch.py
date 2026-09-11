@@ -21,13 +21,15 @@ import cv2
 import numpy as np
 
 from config import settings
-from ops import rotation_refine
-from ops.rotation_refine import refine as refine_rotations
+from ops.rotation_refine import refine_poses
 
 log = logging.getLogger("orbit-worker")
 
-# Typical rear-camera horizontal field of view. Phones vary (60-70 degrees).
-DEFAULT_HFOV_DEG = 65.0
+# Rear-camera horizontal field of view to assume when the photos cannot measure
+# it themselves. Phones vary (60-70 degrees); measured from a real capture's
+# overlaps it came out at 63, where 65 had been assumed. Normally replaced per
+# capture by rotation_refine.estimate_hfov.
+DEFAULT_HFOV_DEG = 63.0
 
 # Widest sphere we are willing to build, in pixels around the equator.
 #
@@ -67,13 +69,14 @@ def quaternion_to_matrix(x, y, z, w):
 
 
 class SphereGeometry(collections.namedtuple(
-        "SphereGeometry", "circumference_px equator_y coverage")):
+        "SphereGeometry", "circumference_px equator_y coverage hfov_deg")):
     """Where the world sits in a panorama this module built.
 
     circumference_px  pixels for one full turn, i.e. 2*pi*focal
     equator_y         the row the horizon falls on
     coverage          uint8 mask, same size as the panorama, non-zero exactly
                       where a photograph actually landed
+    hfov_deg          the field of view the photos were warped with
 
     The mask is the important one. Finishing used to infer coverage from the
     pixels, by calling anything near-black "no data" and anything else real.
@@ -90,7 +93,7 @@ class SphereGeometry(collections.namedtuple(
     __slots__ = ()
 
 
-SphereGeometry.__new__.__defaults__ = (None,)   # coverage is optional
+SphereGeometry.__new__.__defaults__ = (None, None)   # coverage, hfov_deg optional
 
 
 def _qmul(a, b):
@@ -259,31 +262,33 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
 
     try:
         h, w = images[usable[0]].shape[:2]
-
-        # Shrink the sources so the sphere stays within budget. Done once, up
-        # front, because every later buffer is sized off this.
-        _, full_focal = intrinsics(w, h, hfov_deg)
-        scale = min(1.0, settings.pose_circumference_px / (2 * math.pi * full_focal))
+        src_w = w
 
         # Where the phone SAYS each camera was, before the photographs get a
         # say. Everything below - the budget prediction and the warp itself -
         # uses these matrices rather than re-deriving them from the quaternions,
         # so refining them refines what is actually warped.
         rotations = [camera_rotation(quats[i]) for i in usable]
+        # Where each photo's optical centre sits, relative to the middle of
+        # the frame, in source pixels. Zero until the photos say otherwise.
+        shifts = [(0.0, 0.0)] * len(usable)
 
         # A compass drifts a few degrees over a couple of minutes of turning,
-        # and at 4096 pixels around a degree is eleven pixels. That is what puts
-        # the same window frame in two places and leaves the blender showing
-        # both. The photos constrain their relative rotations far better than
-        # the sensor does, so they are asked - with the sensor still setting
-        # which way is up and which way is north.
+        # and at 4096 pixels around a degree is eleven pixels. Worse, every
+        # photo is a stabilised video frame whose centre has been cropped off
+        # to one side. Either one puts the same window frame in two places and
+        # leaves the blender showing both. The photos constrain both far better
+        # than the sensor does, so they are asked - with the sensor still
+        # setting which way is up and which way is north. The field of view is
+        # measured on the way, and replaces the assumed one.
         if settings.refine_rotations and len(usable) >= 3:
-            ref_w = min(rotation_refine.WORK_WIDTH, w)
-            ref_h = max(1, int(round(h * ref_w / float(w))))
-            K_ref, _ = intrinsics(ref_w, ref_h, hfov_deg)
-            rotations, _ = refine_rotations([images[i] for i in usable],
-                                            rotations, K_ref, hfov_deg,
-                                            work_width=ref_w)
+            rotations, shifts, hfov_deg, _ = refine_poses(
+                [images[i] for i in usable], rotations, hfov_deg)
+
+        # Shrink the sources so the sphere stays within budget. Done after the
+        # field of view is known, because the focal length decides the size.
+        _, full_focal = intrinsics(w, h, hfov_deg)
+        scale = min(1.0, settings.pose_circumference_px / (2 * math.pi * full_focal))
 
         # And again for the tile budget, so no photo has to be abandoned later.
         scale *= _plan_scale(rotations, max(1, int(w * scale)),
@@ -300,7 +305,8 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
 
         warped, masks, corners = [], [], []
         running_px = 0
-        for i, R in zip(usable, rotations):
+        k_scale = w / float(src_w)
+        for i, R, (dx, dy) in zip(usable, rotations, shifts):
             img = images[i]
             if img.shape[:2] != (h, w):
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
@@ -309,11 +315,16 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             # was the transposed camera_rotation above, and the two errors hid
             # each other.
             #
-            # R comes from the refined set, not from the quaternion.
+            # R comes from the refined set, not from the quaternion, and each
+            # photo gets its own camera matrix: the shared focal length, with
+            # the centre where stabilisation actually left it.
+            K_i = K.copy()
+            K_i[0, 2] += dx * k_scale
+            K_i[1, 2] += dy * k_scale
 
-            corner, wimg = warper.warp(img, K, R, cv2.INTER_LINEAR, cv2.BORDER_REFLECT)
+            corner, wimg = warper.warp(img, K_i, R, cv2.INTER_LINEAR, cv2.BORDER_REFLECT)
             solid = np.full((h, w), 255, dtype=np.uint8)
-            _, wmask = warper.warp(solid, K, R, cv2.INTER_NEAREST, cv2.BORDER_CONSTANT)
+            _, wmask = warper.warp(solid, K_i, R, cv2.INTER_NEAREST, cv2.BORDER_CONSTANT)
 
             warped.append(wimg)
             masks.append(wmask)
@@ -357,7 +368,7 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         # focal * pi/2. Subtracting the canvas origin puts that in image rows.
         geom = SphereGeometry(circumference_px=2.0 * math.pi * focal,
                               equator_y=focal * math.pi / 2.0 - y0,
-                              coverage=cover)
+                              coverage=cover, hfov_deg=hfov_deg)
 
         log.info("[orbit-worker] pose stitch placed %d photo(s) from recorded "
                  "rotations; one turn is %.0f px, horizon at row %.0f",

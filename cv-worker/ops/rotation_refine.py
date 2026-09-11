@@ -1,4 +1,4 @@
-"""Correcting the phone's recorded rotations against what the photos show.
+"""Correcting the phone's recorded poses against what the photos show.
 
 Pose stitching trusts the sensor quaternion completely. That is the right
 default - it is the reason a blank wall places as reliably as a bookshelf - but
@@ -12,20 +12,26 @@ eleven pixels, so a three degree error puts the same window frame in two places
 thirty pixels apart. Multi-band blending then shows both of them, which is the
 doubled edges and the wavy ceiling lines in the finished sphere.
 
-The photos themselves know better than the compass. Two overlapping shots of
-the same wall constrain their RELATIVE rotation very precisely, because a pure
-rotation between two views is a homography and a homography is recoverable from
-a few dozen matched points. This module measures those relative rotations and
-finds the set of absolute rotations that agrees with them best.
+Rotation is not the only thing that is wrong, and it is not the biggest. Every
+photo is a frame grabbed from the live camera video, and phones STABILISE video
+by cropping a window that moves from frame to frame. So each photo's optical
+centre sits somewhere different - measured on a real 32-photo capture, up to 85
+pixels at 640 wide, an eighth of the frame. A shift is not a rotation, and the
+previous version of this module could only solve rotations: it turned each
+shift into a false rotation to explain it, so both the placement and the angle
+came out wrong. That is what broke the window mullions and the stair rails.
+
+So this module solves both at once: one rotation and one image-centre shift per
+photo, in a single bundle adjustment over every overlapping pair.
 
 What it deliberately does NOT do is throw the sensor away. Feature matching
 alone cannot tell which way is up: a solution where the entire world is tilted
 fifteen degrees fits the photographs exactly as well as the correct one, and
 picking the wrong one puts the horizon on a slant and the ceiling off to one
-side. So the sensor sets the global frame - gravity and heading - and matching
-is only allowed to fix the rotations RELATIVE to each other. Every camera is
-also held within a few degrees of where the phone said it was, so one bad match
-on a repetitive railing cannot drag the panorama somewhere absurd.
+side. So the solve is seeded from the sensor, only gyro-overlapping pairs are
+ever matched, the result is put back into the sensor's gravity and heading, and
+every camera is held within a few degrees of where the phone said it was, so one
+bad match on a repetitive railing cannot drag the panorama somewhere absurd.
 """
 import logging
 import math
@@ -35,9 +41,9 @@ import numpy as np
 
 log = logging.getLogger("orbit-worker")
 
-# Resolution features are found at. The rotation between two photos is a global
-# property of the overlap - it does not need fine detail, and matching full-size
-# phone photos costs seconds each for an answer that does not change.
+# Resolution features are found at. The pose of a photo is a global property of
+# its overlaps - it does not need fine detail, and matching full-size phone
+# photos costs seconds each for an answer that does not change.
 WORK_WIDTH = 640
 
 # Two photos are only worth matching when the sensor already says they overlap.
@@ -46,18 +52,34 @@ WORK_WIDTH = 640
 # Expressed as a multiple of the field of view.
 OVERLAP_FOV_FACTOR = 1.25
 
-# A pair needs this many RANSAC inliers before its measured rotation is trusted.
-MIN_INLIERS = 25
+# OpenCV's pair confidence (inliers relative to matches) a pair needs before the
+# bundle adjuster uses it. This is OpenCV's own stitcher's threshold.
+PAIR_CONF = 1.0
 
 # How far a camera may be moved from where the phone said it was. The sensor is
 # wrong by a few degrees, not by twenty; a correction larger than this is a
 # matching failure, not a sensor failure.
 MAX_CORRECTION_DEG = 10.0
 
-# Rotation averaging converges quickly - it is a linear problem being solved by
-# repeated projection - and the later passes move things by fractions of a
-# degree.
-ITERATIONS = 12
+# How far a photo's centre may be moved, as a fraction of its width. Video
+# stabilisation crops a margin of roughly a tenth of the frame on each side.
+MAX_SHIFT_FRAC = 0.15
+
+# A pair still this far out after the solve, in pixels at WORK_WIDTH, is not a
+# stabilisation shift or a drifting compass - the phone moved sideways between
+# the two shots, and near and far things no longer line up under ANY rotation.
+# Such a pair is removed and the rest solved again, so that parallax cannot
+# pull its neighbours out of place along with it.
+PARALLAX_GATE_PX = 4.0
+
+# Range the field of view may be measured in, and the least number of pairs
+# the measurement needs before it is believed over the default.
+FOV_RANGE_DEG = (50, 75)
+FOV_MIN_PAIRS = 3
+# How close to a pure rotation a pair's homography must come, at its best field
+# of view, to count towards measuring it. A stabilised or parallax pair never
+# gets there, whatever the field of view, so it cannot bias the answer.
+FOV_ROTATION_TOL = 0.03
 
 
 def _project_to_so3(m):
@@ -78,7 +100,7 @@ def _project_to_so3(m):
 
 def _angle_between(a, b):
     """Angle in degrees of the rotation that takes `a` to `b`."""
-    cos = (np.trace(a.T @ b) - 1.0) / 2.0
+    cos = (np.trace(np.asarray(a, np.float64).T @ np.asarray(b, np.float64)) - 1.0) / 2.0
     return math.degrees(math.acos(max(-1.0, min(1.0, float(cos)))))
 
 
@@ -88,73 +110,9 @@ def _detector():
     return cv2.ORB_create(nfeatures=2000)
 
 
-def _features(images, work_width):
-    det = _detector()
-    out = []
-    for img in images:
-        h, w = img.shape[:2]
-        scale = work_width / float(w)
-        small = (cv2.resize(img, (work_width, max(1, int(h * scale))),
-                            interpolation=cv2.INTER_AREA) if scale < 1 else img)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        kp, desc = det.detectAndCompute(gray, None)
-        out.append((kp, desc, small.shape[1], small.shape[0]))
-    return out
-
-
-def _matcher(desc_type):
-    if desc_type == np.uint8:                # ORB
-        return cv2.BFMatcher(cv2.NORM_HAMMING)
-    return cv2.BFMatcher(cv2.NORM_L2)
-
-
-def _relative_rotation(fi, fj, K, ratio=0.75):
-    """Rotation taking camera i's frame to camera j's, from the pixels alone.
-
-    For two views from the SAME point, x_j = K R_ij K^-1 x_i exactly - there is
-    no translation term and therefore no depth in the equation. So the
-    homography between them is a pure rotation wearing a camera matrix, and
-    stripping K off both sides recovers it. This is why a panorama can be solved
-    without knowing how far away anything is, and why it stops working the
-    moment the photographer walks.
-
-    Returns (R_ij, inlier_count) or (None, 0).
-    """
-    kp_i, desc_i = fi[0], fi[1]
-    kp_j, desc_j = fj[0], fj[1]
-    if desc_i is None or desc_j is None or len(kp_i) < 8 or len(kp_j) < 8:
-        return None, 0
-
-    try:
-        pairs = _matcher(desc_i.dtype.type).knnMatch(desc_i, desc_j, k=2)
-    except cv2.error:
-        return None, 0
-
-    # Lowe's ratio test: a match is only meaningful when the best candidate is
-    # clearly better than the second best. On repetitive architecture - a row of
-    # identical windows, a railing - the two are equally good, and this is what
-    # stops those from being matched confidently in the wrong place.
-    src, dst = [], []
-    for pair in pairs:
-        if len(pair) == 2 and pair[0].distance < ratio * pair[1].distance:
-            src.append(kp_i[pair[0].queryIdx].pt)
-            dst.append(kp_j[pair[0].trainIdx].pt)
-    if len(src) < MIN_INLIERS:
-        return None, 0
-
-    H, mask = cv2.findHomography(np.float32(src), np.float32(dst),
-                                 cv2.RANSAC, 3.0, maxIters=2000, confidence=0.995)
-    if H is None or mask is None:
-        return None, 0
-    inliers = int(mask.sum())
-    if inliers < MIN_INLIERS:
-        return None, inliers
-
-    # H = K R_ij K^-1, so R_ij = K^-1 H K - up to scale, which the projection
-    # back onto SO(3) removes along with the accumulated numerical error.
-    Kinv = np.linalg.inv(K)
-    R = _project_to_so3(Kinv @ H @ K)
-    return R, inliers
+def _pinhole(width, height, hfov_deg):
+    f = (width / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
+    return np.array([[f, 0, width / 2.0], [0, f, height / 2.0], [0, 0, 1.0]]), f
 
 
 def _pairs_to_try(rotations, fov_deg):
@@ -170,105 +128,259 @@ def _pairs_to_try(rotations, fov_deg):
     return out
 
 
-def refine(images, rotations, K, fov_deg, work_width=WORK_WIDTH,
-           max_correction_deg=MAX_CORRECTION_DEG):
-    """Rotations that agree with the photographs, anchored to the sensor's frame.
+def _edges(pairwise):
+    """Indices of the usable pairs in OpenCV's n*n match table, one per pair."""
+    return [p for p, m in enumerate(pairwise)
+            if 0 <= m.src_img_idx < m.dst_img_idx and m.confidence > PAIR_CONF]
 
-    images     BGR frames, in the same order as `rotations`
+
+def _non_rotation(H, K):
+    """How far K^-1 H K is from a pure rotation. Zero means exactly one."""
+    M = np.linalg.inv(K) @ np.asarray(H, np.float64) @ K
+    det = np.linalg.det(M)
+    if not np.isfinite(det) or abs(det) < 1e-12:
+        return float("inf")
+    M = M / np.cbrt(det)
+    return float(np.linalg.norm(M - _project_to_so3(M).astype(np.float64)))
+
+
+def estimate_hfov(pairwise, width, height, default_deg):
+    """The camera's horizontal field of view, measured from the photos.
+
+    For two views from one point the homography between them is K R K^-1, so
+    with the RIGHT field of view K^-1 H K is exactly a rotation, and with a
+    wrong one it is not. Sweeping the field of view and keeping the one that
+    makes the pairs most rotation-like measures it without any calibration.
+    Measured on a real capture it came out at 63 degrees with a sharp minimum,
+    where the code had assumed 65.
+
+    Only pairs that come close to a rotation at their best field of view are
+    counted: a stabilised or parallax pair is not a rotation at any, and would
+    only pull the answer about. Too few clean pairs, and the default stands.
+    """
+    fovs = np.arange(FOV_RANGE_DEG[0], FOV_RANGE_DEG[1] + 0.25, 0.5)
+    # OpenCV's matcher fits each pair's homography in coordinates CENTRED on
+    # the middle of the image, so the camera matrix has its centre at the
+    # origin here. With the centre at (w/2, h/2) no pair ever looked like a
+    # rotation and the measurement silently never ran.
+    Ks = []
+    for f in fovs:
+        K = _pinhole(width, height, f)[0]
+        K[0, 2] = K[1, 2] = 0.0
+        Ks.append(K)
+    scores = []
+    for p in _edges(pairwise):
+        H = pairwise[p].H
+        if H is None or np.asarray(H).shape != (3, 3):
+            continue
+        row = np.array([_non_rotation(H, K) for K in Ks])
+        if np.isfinite(row).all() and row.min() < FOV_ROTATION_TOL:
+            scores.append(row)
+    if len(scores) < FOV_MIN_PAIRS:
+        return default_deg, len(scores)
+    best = float(fovs[int(np.argmin(np.median(np.array(scores), axis=0)))])
+    # At either end of the range the true answer may lie beyond it, so the
+    # measurement says nothing trustworthy.
+    if best <= FOV_RANGE_DEG[0] or best >= FOV_RANGE_DEG[1]:
+        return default_deg, len(scores)
+    return best, len(scores)
+
+
+def _camera(R, focal, cx, cy):
+    c = cv2.detail.CameraParams()
+    c.focal = float(focal)
+    c.aspect = 1.0
+    c.ppx = float(cx)
+    c.ppy = float(cy)
+    c.R = np.asarray(R, np.float32)
+    c.t = np.zeros((3, 1), np.float64)
+    return c
+
+
+def _pair_error(pairwise, p, feats, cams):
+    """Median reprojection error of one pair's inliers under the solved poses."""
+    m = pairwise[p]
+    i, j = m.src_img_idx, m.dst_img_idx
+    H = (cams[j].K() @ cams[j].R.astype(np.float64).T @ cams[i].R.astype(np.float64)
+         @ np.linalg.inv(cams[i].K()))
+    kp_i, kp_j = feats[i].getKeypoints(), feats[j].getKeypoints()
+    inl = m.getInliers()
+    src, dst = [], []
+    for k, mt in enumerate(m.getMatches()):
+        if inl[k]:
+            src.append(kp_i[mt.queryIdx].pt)
+            dst.append(kp_j[mt.trainIdx].pt)
+    if len(src) < 8:
+        return None
+    proj = cv2.perspectiveTransform(np.float32(src).reshape(-1, 1, 2), H).reshape(-1, 2)
+    return float(np.median(np.linalg.norm(proj - np.float32(dst), axis=1)))
+
+
+def _drop_pair(pairwise, p):
+    m = pairwise[p]
+    a, b = m.src_img_idx, m.dst_img_idx
+    for q in pairwise:
+        if (q.src_img_idx, q.dst_img_idx) in ((a, b), (b, a)):
+            q.confidence = 0.0
+
+
+def _unchanged(rotations, stats, hfov_deg):
+    return ([np.asarray(R, np.float32) for R in rotations],
+            [(0.0, 0.0)] * len(rotations), hfov_deg, stats)
+
+
+def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
+                 max_correction_deg=MAX_CORRECTION_DEG, measure_fov=True):
+    """Rotations and image-centre shifts that agree with the photographs.
+
+    images     BGR frames, in the same order as `rotations`, all one size
     rotations  camera-to-world matrices from the sensor, one per image
-    K          camera matrix at `work_width` resolution
-    fov_deg    horizontal field of view, used only to decide which pairs overlap
+    hfov_deg   the field of view to assume, and to fall back on
+    measure_fov  measure the field of view from the photos first
 
-    Returns (refined_rotations, stats). On any failure the input rotations come
-    back unchanged - a capture placed by a drifting compass is still a capture,
-    whereas one placed by a bad homography is a mess.
+    Returns (rotations, shifts, hfov_deg, stats). `shifts` is one (dx, dy) per
+    photo in pixels of the images as given: where that photo's optical centre
+    actually sits relative to the middle of the frame. On any failure the
+    sensor rotations come back with zero shifts - a capture placed by a
+    drifting compass is still a capture, whereas one placed by a bad solve is a
+    mess.
     """
     n = len(rotations)
-    stats = {"pairs_tried": 0, "pairs_used": 0, "max_correction_deg": 0.0,
-             "mean_correction_deg": 0.0, "clamped": 0}
+    stats = {"pairs_tried": 0, "pairs_used": 0, "parallax_dropped": 0,
+             "max_correction_deg": 0.0, "mean_correction_deg": 0.0,
+             "max_shift_px": 0.0, "clamped": 0, "hfov_deg": hfov_deg,
+             "fov_pairs": 0}
     if n < 3:
-        return rotations, stats
+        return _unchanged(rotations, stats, hfov_deg)
+
+    h, w = images[0].shape[:2]
+    scale = min(1.0, work_width / float(w))
+    sw, sh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
 
     try:
-        feats = _features(images, work_width)
+        finder = _detector()
+        feats = []
+        for i, img in enumerate(images):
+            small = (cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+                     if img.shape[1] != sw else img)
+            ft = cv2.detail.computeImageFeatures2(finder, small)
+            ft.img_idx = i
+            feats.append(ft)
+
+        pairs = _pairs_to_try(rotations, hfov_deg)
+        stats["pairs_tried"] = len(pairs)
+        mask = np.zeros((n, n), np.uint8)
+        for i, j in pairs:
+            mask[i, j] = mask[j, i] = 1
+        matcher = cv2.detail.BestOf2NearestMatcher_create(False, 0.3)
+        pairwise = matcher.apply2(feats, mask)
+        matcher.collectGarbage()
     except cv2.error as e:
-        log.warning("[orbit-worker] rotation refinement: features unavailable (%s)", e)
-        return rotations, stats
+        log.warning("[orbit-worker] pose refinement: features unavailable (%s)", e)
+        return _unchanged(rotations, stats, hfov_deg)
 
-    pairs = _pairs_to_try(rotations, fov_deg)
-    stats["pairs_tried"] = len(pairs)
+    if measure_fov:
+        hfov_deg, stats["fov_pairs"] = estimate_hfov(pairwise, sw, sh, hfov_deg)
+        stats["hfov_deg"] = hfov_deg
+    _, focal = _pinhole(sw, sh, hfov_deg)
 
-    # measured[i] holds (j, R_ij, weight): what photo j says photo i's rotation
-    # should be, relative to j's own.
-    measured = [[] for _ in range(n)]
-    for i, j in pairs:
-        R_ij, inliers = _relative_rotation(feats[i], feats[j], K)
-        if R_ij is None:
-            continue
-        # Sanity: the measurement must be near what the sensor already believes.
-        # A homography fitted to a repeating railing can be confidently wrong,
-        # and this is the cheapest place to catch it.
-        sensor_ij = rotations[j].T @ rotations[i]
-        if _angle_between(sensor_ij, R_ij) > max_correction_deg * 2.0:
-            continue
-        stats["pairs_used"] += 1
-        measured[i].append((j, R_ij, float(inliers)))
-        measured[j].append((i, R_ij.T, float(inliers)))
+    edges = _edges(pairwise)
+    if len(edges) < max(2, n // 4):
+        log.info("[orbit-worker] pose refinement: only %d usable pairs from %d "
+                 "tried; keeping the sensor rotations", len(edges), len(pairs))
+        stats["pairs_used"] = len(edges)
+        return _unchanged(rotations, stats, hfov_deg)
 
-    if stats["pairs_used"] < max(2, n // 4):
-        log.info("[orbit-worker] rotation refinement: only %d usable pairs from "
-                 "%d tried; keeping the sensor rotations",
-                 stats["pairs_used"], stats["pairs_tried"])
-        return rotations, stats
-
-    # Rotation averaging. Each neighbour votes for where camera i should be
-    # (R_j @ R_ij); the votes are summed as matrices and projected back onto
-    # SO(3), which is the closed-form average of a set of rotations. The sensor
-    # itself votes too, with a modest weight, so a camera nobody matched stays
-    # where the phone put it instead of drifting off.
-    current = [R.copy() for R in rotations]
-    sensor_weight = max(1.0, np.mean([w for m in measured for _, _, w in m] or [1.0]) * 0.15)
-    for _ in range(ITERATIONS):
-        updated = []
-        for i in range(n):
-            acc = current[i] * sensor_weight if not measured[i] else rotations[i] * sensor_weight
-            for j, R_ij, weight in measured[i]:
-                acc = acc + (current[j] @ R_ij) * weight
-            updated.append(_project_to_so3(acc))
-        current = updated
+    # Rotations are always refined by the adjuster; the mask adds the image
+    # centre (ppx, ppy) and nothing else. Focal length is left alone - it was
+    # just measured, and freeing it lets the solver trade it against the
+    # shifts - and phone pixels are square.
+    refine_mask = np.zeros((3, 3), np.uint8)
+    refine_mask[0, 2] = refine_mask[1, 2] = 1
+    cams = None
+    try:
+        for attempt in range(2):
+            adjuster = cv2.detail_BundleAdjusterReproj()
+            adjuster.setConfThresh(PAIR_CONF)
+            adjuster.setRefinementMask(refine_mask)
+            seed = [_camera(R, focal, sw / 2.0, sh / 2.0) for R in rotations]
+            ok, cams = adjuster.apply(feats, pairwise, seed)
+            if not ok or not cams:
+                log.info("[orbit-worker] pose refinement: the solve did not converge; "
+                         "keeping the sensor rotations")
+                return _unchanged(rotations, stats, hfov_deg)
+            if attempt:
+                break
+            bad = [p for p in _edges(pairwise)
+                   if (_pair_error(pairwise, p, feats, cams) or 0.0) > PARALLAX_GATE_PX]
+            if not bad:
+                break
+            for p in bad:
+                _drop_pair(pairwise, p)
+            stats["parallax_dropped"] = len(bad)
+            if len(_edges(pairwise)) < max(2, n // 4):
+                log.info("[orbit-worker] pose refinement: %d of %d pairs show "
+                         "parallax; keeping the sensor rotations", len(bad), len(edges))
+                return _unchanged(rotations, stats, hfov_deg)
+    except cv2.error as e:
+        log.warning("[orbit-worker] pose refinement: solve failed (%s)", e)
+        return _unchanged(rotations, stats, hfov_deg)
+    stats["pairs_used"] = len(_edges(pairwise))
 
     # Put the world back where the sensor said it was.
     #
-    # Averaging fixes the cameras relative to each other but leaves the whole
+    # The solve fixes the cameras relative to each other but leaves the whole
     # set free to rotate as one, and nothing in the photographs objects to that.
     # Left alone it tilts the horizon and swings the heading. So the single
-    # global rotation that best maps the refined set back onto the sensor set is
+    # global rotation that best maps the solved set back onto the sensor set is
     # found and applied - gravity and compass from the sensor, relative geometry
     # from the photographs, which is what each of them is actually good at.
+    solved = [c.R.astype(np.float64) for c in cams]
     acc = np.zeros((3, 3))
-    for R_new, R_old in zip(current, rotations):
-        acc += R_old @ R_new.T
-    align = _project_to_so3(acc)
-    current = [_project_to_so3(align @ R) for R in current]
+    for R_new, R_old in zip(solved, rotations):
+        acc += np.asarray(R_old, np.float64) @ R_new.T
+    align = _project_to_so3(acc).astype(np.float64)
+    solved = [_project_to_so3(align @ R) for R in solved]
 
-    # Nobody moves more than the sensor could plausibly have been wrong by.
-    out = []
-    corrections = []
-    for R_new, R_old in zip(current, rotations):
+    # Nobody moves more than the sensor could plausibly have been wrong by, and
+    # no centre moves further than stabilisation can crop.
+    out_r, out_s, corrections, shift_sizes = [], [], [], []
+    limit_px = MAX_SHIFT_FRAC * w
+    for R_new, R_old, cam in zip(solved, rotations, cams):
+        dx = (cam.ppx - sw / 2.0) / scale
+        dy = (cam.ppy - sh / 2.0) / scale
         delta = _angle_between(R_old, R_new)
-        if delta > max_correction_deg:
+        if delta > max_correction_deg or abs(dx) > limit_px or abs(dy) > limit_px:
             stats["clamped"] += 1
-            out.append(R_old)
+            out_r.append(np.asarray(R_old, np.float32))
+            out_s.append((0.0, 0.0))
             continue
         corrections.append(delta)
-        out.append(R_new)
+        shift_sizes.append(math.hypot(dx, dy))
+        out_r.append(R_new)
+        out_s.append((float(dx), float(dy)))
 
     if corrections:
         stats["max_correction_deg"] = round(max(corrections), 2)
         stats["mean_correction_deg"] = round(float(np.mean(corrections)), 2)
-    log.info("[orbit-worker] rotation refinement: %d of %d pairs matched, "
-             "cameras moved %.1f deg on average (worst %.1f), %d clamped",
-             stats["pairs_used"], stats["pairs_tried"],
-             stats["mean_correction_deg"], stats["max_correction_deg"],
-             stats["clamped"])
-    return out, stats
+        stats["max_shift_px"] = round(max(shift_sizes), 1)
+    log.info("[orbit-worker] pose refinement: %d of %d pairs used (%d dropped for "
+             "parallax), field of view %.1f deg from %d pairs, cameras moved %.1f deg "
+             "on average (worst %.1f), centres shifted up to %.0f px, %d clamped",
+             stats["pairs_used"], stats["pairs_tried"], stats["parallax_dropped"],
+             hfov_deg, stats["fov_pairs"], stats["mean_correction_deg"],
+             stats["max_correction_deg"], stats["max_shift_px"], stats["clamped"])
+    return out_r, out_s, hfov_deg, stats
+
+
+def refine(images, rotations, K, fov_deg, work_width=WORK_WIDTH,
+           max_correction_deg=MAX_CORRECTION_DEG):
+    """Rotations only, at a fixed field of view - see refine_poses.
+
+    K is accepted for compatibility and not needed: the solve builds its own
+    camera matrix at `work_width` from `fov_deg`.
+    """
+    rots, _, _, stats = refine_poses(images, rotations, fov_deg, work_width=work_width,
+                                     max_correction_deg=max_correction_deg,
+                                     measure_fov=False)
+    return rots, stats

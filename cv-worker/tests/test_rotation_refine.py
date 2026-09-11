@@ -16,7 +16,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ops.pose_stitch import (camera_rotation, intrinsics, quaternion_from_heading)
-from ops.rotation_refine import _angle_between, _project_to_so3, refine
+from ops.rotation_refine import _angle_between, _project_to_so3, refine, refine_poses
 
 pass_n = fail_n = 0
 
@@ -43,10 +43,13 @@ def world(seed=7):
     return cv2.GaussianBlur(img, (0, 0), 1.2)
 
 
-def shoot(src, yaw, pitch):
-    f = (FW / 2) / math.tan(math.radians(HFOV) / 2)
+def shoot(src, yaw, pitch, dx=0.0, dy=0.0, hfov=HFOV):
+    """One photo. dx, dy put its optical centre off the middle of the frame,
+    the way video stabilisation's wandering crop does."""
+    f = (FW / 2) / math.tan(math.radians(hfov) / 2)
     j, i = np.meshgrid(np.arange(FW), np.arange(FH))
-    rays = np.stack([(j - FW / 2) / f, -(i - FH / 2) / f, -np.ones_like(j, float)], -1)
+    rays = np.stack([(j - FW / 2 - dx) / f, -(i - FH / 2 - dy) / f,
+                     -np.ones_like(j, float)], -1)
     quat = quaternion_from_heading(yaw, pitch)
     from ops.pose_stitch import quaternion_to_matrix
     v = rays @ np.array(quaternion_to_matrix(*quat)).T
@@ -169,6 +172,34 @@ deltas = [_angle_between(a, b) for a, b in zip(sensor, kept)]
 check("blank photos leave the sensor rotations alone",
       max(deltas) < 0.05, "worst %.4f deg" % max(deltas))
 check("and it says so rather than claiming success", stats3["pairs_used"] < 3, str(stats3))
+
+print("\ntest_it_finds_where_stabilisation_moved_each_photo:")
+# Every photo is a stabilised video frame whose centre has been cropped off to
+# one side by a different amount. A rotation cannot explain a shift, so the
+# solve has to find it - and the rotations must still come out right.
+src = world()
+rs = np.random.default_rng(11)
+true_shift = [tuple(rs.uniform(-40, 40, 2)) for _ in PLAN]
+imgs_s = [shoot(src, y, p, dx, dy)[0] for (y, p), (dx, dy) in zip(PLAN, true_shift)]
+rots_s, shifts_s, _, stats_s = refine_poses(imgs_s, sensor, HFOV, measure_fov=False)
+est, tru = np.array(shifts_s), np.array(true_shift)
+# A shift shared by every photo trades against a small global rotation, and
+# neither changes a single seam, so it is divided out before comparing.
+serr = np.linalg.norm((est - est.mean(0)) - (tru - tru.mean(0)), axis=1)
+rerr = residuals(truth, rots_s)
+print("       shift error mean %.2f px, worst %.2f; rotation error mean %.2f deg"
+      % (serr.mean(), serr.max(), np.mean(rerr)))
+check("every photo's shift is found to within 2 px", serr.max() < 2.0,
+      "worst %.2f px" % serr.max())
+check("and the rotations are still right", np.mean(rerr) < 0.3, "%.2f deg" % np.mean(rerr))
+check("no photo had to be clamped back to the sensor", stats_s["clamped"] == 0, str(stats_s))
+
+print("\ntest_it_measures_the_field_of_view:")
+# Photographed at 58 degrees, solved starting from the 63 the code assumes.
+imgs_f = [shoot(src, y, p, hfov=58.0)[0] for y, p in PLAN]
+_, _, fov, stats_f = refine_poses(imgs_f, truth, 63.0)
+check("the field of view is measured, not assumed", abs(fov - 58.0) <= 1.0,
+      "%.1f deg from %d pairs" % (fov, stats_f["fov_pairs"]))
 
 print("\n%d failure(s)" % fail_n)
 sys.exit(1 if fail_n else 0)

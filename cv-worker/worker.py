@@ -737,7 +737,7 @@ def handle_finalize_job(mc, job, attempt=1):
             src_h, src_w = images[0].shape[:2]
             coverage = sphere_coverage(
                 [q for q in quats if q is not None],
-                hfov_deg=65.0, aspect=src_h / float(src_w))
+                hfov_deg=geom.hfov_deg, aspect=src_h / float(src_w))
             log.info("%s capture=%s covers %.0f%% of the sphere",
                      PREFIX, capture_id, coverage * 100)
             _release(images)
