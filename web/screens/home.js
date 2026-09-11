@@ -108,6 +108,38 @@ const ScreenHome = (() => {
     return c.status === "partial" || c.status === "failed";
   }
 
+  // Only a finished sphere has a panorama file to hand over. "partial" still
+  // has one - it is the fallback image the viewer is already showing.
+  function canDownload(c) {
+    return c.status === "ready" || c.status === "partial";
+  }
+
+  // Same path as the viewer's download button: fetch as a blob (a plain
+  // <a download> is ignored cross-origin), then make it a valid 2:1 GPano 360.
+  async function downloadPanorama(c, btn) {
+    const was = btn.textContent;
+    btn.textContent = "…";
+    btn.disabled = true;
+    try {
+      const res = await fetch(OrbitAPI.panoramaURL(c.id) + "?download=1");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const blob = await GPano.prepareDownload(await res.blob());
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (c.title || "360").replace(/[\\/:*?"<>|]/g, "-") + ".jpg";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 20000);
+      btn.textContent = "✓";
+      setTimeout(() => { btn.textContent = was; btn.disabled = false; }, 1600);
+    } catch (e) {
+      btn.textContent = "✕";
+      btn.title = "Could not download: " + e.message;
+      setTimeout(() => { btn.textContent = was; btn.disabled = false; }, 2200);
+    }
+  }
+
   function rowHtml(c) {
     const badgeClass = c.status === "ready" || c.status === "partial" ? "ready"
       : c.status === "failed" ? "failed"
@@ -122,6 +154,7 @@ const ScreenHome = (() => {
           <div class="s">${modeLabel(c.mode)} · ${new Date(c.created_at).toLocaleString()}</div>
         </div>
         <span class="badge ${badgeClass}">${c.status}</span>
+        ${canDownload(c) ? `<button class="row-download" title="Download this 360 as an image" aria-label="Download ${escapeHtml(c.title)}">⭳</button>` : ""}
         ${canRebuild(c) ? `<button class="row-rebuild" title="Build this 360 again from the same photos" aria-label="Build ${escapeHtml(c.title)} again">\u21bb</button>` : ""}
         <button class="row-delete" title="Delete this capture" aria-label="Delete ${escapeHtml(c.title)}">\u00d7</button>
       </div>`;
@@ -132,6 +165,11 @@ const ScreenHome = (() => {
     if (del) del.addEventListener("click", (ev) => {
       ev.stopPropagation();   // don't open the capture we're deleting
       confirmDelete(app, row, c);
+    });
+    const download = row.querySelector(".row-download");
+    if (download) download.addEventListener("click", (ev) => {
+      ev.stopPropagation();   // don't open the capture we're downloading
+      if (!download.disabled) downloadPanorama(c, download);
     });
     const rebuild = row.querySelector(".row-rebuild");
     if (rebuild) rebuild.addEventListener("click", async (ev) => {
