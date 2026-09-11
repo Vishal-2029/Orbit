@@ -85,9 +85,15 @@ const ScreenProcessing = (() => {
       log.scrollTop = log.scrollHeight;
     }
 
+    // Not every event carries every number - a plain "status" message has no
+    // processed count - so each one is kept until an event actually sends a
+    // new value, rather than printing "undefined / 32".
+    let shownProcessed = 0, shownPct = 0;
     function setProgress(pct, processed, tot) {
-      bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-      countLine.textContent = tot ? `${processed} / ${tot} frames processed` : "";
+      if (typeof pct === "number" && isFinite(pct)) shownPct = pct;
+      if (typeof processed === "number" && isFinite(processed)) shownProcessed = processed;
+      bar.style.width = `${Math.max(0, Math.min(100, shownPct))}%`;
+      countLine.textContent = tot ? `${shownProcessed} / ${tot} frames processed` : "";
     }
 
     function finish(manifest, degraded, degradedWhy) {

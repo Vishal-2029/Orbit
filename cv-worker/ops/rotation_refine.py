@@ -49,7 +49,10 @@ WORK_WIDTH = 640
 # Two photos are only worth matching when the sensor already says they overlap.
 # Beyond this angle between their optical axes they share nothing, and testing
 # them anyway is where false matches on repetitive architecture come from.
-# Expressed as a multiple of the field of view.
+# Expressed as a multiple of the field of view. Tightening it to one frame
+# width lost the diagonal pairs that tie one ring to the next, and cameras on
+# the rings above and below then came out several degrees off. False matches
+# across a sliver of overlap are removed by the sensor check instead.
 OVERLAP_FOV_FACTOR = 1.25
 
 # OpenCV's pair confidence (inliers relative to matches) a pair needs before the
@@ -71,6 +74,17 @@ MAX_SHIFT_FRAC = 0.15
 # Such a pair is removed and the rest solved again, so that parallax cannot
 # pull its neighbours out of place along with it.
 PARALLAX_GATE_PX = 4.0
+
+# The gate is applied in rounds, worst pairs first, re-solving in between. Done
+# all at once it judged every pair against a solve the bad pairs had already
+# dragged out of place, so on a real capture 44 of 45 failed and nothing was
+# refined at all. Four rounds took the same capture to 20 pairs at 1.2 px.
+GATE_ROUNDS = 4
+
+# Iterations the bundle adjuster may take per round. OpenCV's default is a
+# thousand; a solve that has not settled in sixty is being pulled about by a
+# bad pair, which the next round removes anyway. Keeps a round to seconds.
+BA_MAX_ITER = 60
 
 # Range the field of view may be measured in, and the least number of pairs
 # the measurement needs before it is believed over the default.
@@ -216,6 +230,36 @@ def _pair_error(pairwise, p, feats, cams):
     return float(np.median(np.linalg.norm(proj - np.float32(dst), axis=1)))
 
 
+def _drop_inconsistent_pairs(pairwise, rotations, width, height, hfov_deg, limit_deg):
+    """Remove pairs whose match disagrees with the sensor by more than limit_deg.
+
+    The sensor is wrong by a few degrees, not by twenty. A pair whose homography
+    implies a rotation that far from what the phone recorded has matched the
+    wrong railing, window or stair edge, and left in it drags the first solve
+    so far out that every good pair then looks bad too. The matcher fits each
+    homography in coordinates centred on the image, hence the centred K.
+
+    Returns how many pairs were removed.
+    """
+    K, _ = _pinhole(width, height, hfov_deg)
+    K[0, 2] = K[1, 2] = 0.0
+    Kinv = np.linalg.inv(K)
+    dropped = 0
+    for p in _edges(pairwise):
+        m = pairwise[p]
+        H = m.H
+        if H is None or np.asarray(H).shape != (3, 3):
+            continue
+        # H takes photo src to photo dst: x_dst = K R_dst^T R_src K^-1 x_src.
+        photo = _project_to_so3(Kinv @ np.asarray(H, np.float64) @ K)
+        sensor = (np.asarray(rotations[m.dst_img_idx], np.float64).T
+                  @ np.asarray(rotations[m.src_img_idx], np.float64))
+        if _angle_between(sensor, photo) > limit_deg:
+            _drop_pair(pairwise, p)
+            dropped += 1
+    return dropped
+
+
 def _drop_pair(pairwise, p):
     m = pairwise[p]
     a, b = m.src_img_idx, m.dst_img_idx
@@ -247,6 +291,7 @@ def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
     """
     n = len(rotations)
     stats = {"pairs_tried": 0, "pairs_used": 0, "parallax_dropped": 0,
+             "inconsistent_dropped": 0,
              "max_correction_deg": 0.0, "mean_correction_deg": 0.0,
              "max_shift_px": 0.0, "clamped": 0, "hfov_deg": hfov_deg,
              "fov_pairs": 0}
@@ -279,6 +324,9 @@ def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
         log.warning("[orbit-worker] pose refinement: features unavailable (%s)", e)
         return _unchanged(rotations, stats, hfov_deg)
 
+    stats["inconsistent_dropped"] = _drop_inconsistent_pairs(
+        pairwise, rotations, sw, sh, hfov_deg, 2.0 * max_correction_deg)
+
     if measure_fov:
         hfov_deg, stats["fov_pairs"] = estimate_hfov(pairwise, sw, sh, hfov_deg)
         stats["hfov_deg"] = hfov_deg
@@ -299,28 +347,34 @@ def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
     refine_mask[0, 2] = refine_mask[1, 2] = 1
     cams = None
     try:
-        for attempt in range(2):
+        for rnd in range(GATE_ROUNDS + 1):
             adjuster = cv2.detail_BundleAdjusterReproj()
             adjuster.setConfThresh(PAIR_CONF)
             adjuster.setRefinementMask(refine_mask)
+            adjuster.setTermCriteria(
+                (cv2.TERM_CRITERIA_COUNT + cv2.TERM_CRITERIA_EPS, BA_MAX_ITER, 1e-4))
             seed = [_camera(R, focal, sw / 2.0, sh / 2.0) for R in rotations]
             ok, cams = adjuster.apply(feats, pairwise, seed)
             if not ok or not cams:
                 log.info("[orbit-worker] pose refinement: the solve did not converge; "
                          "keeping the sensor rotations")
                 return _unchanged(rotations, stats, hfov_deg)
-            if attempt:
+            errors = [(_pair_error(pairwise, p, feats, cams) or 0.0, p)
+                      for p in _edges(pairwise)]
+            above = [(e, p) for e, p in errors if e > PARALLAX_GATE_PX]
+            if not above or rnd == GATE_ROUNDS:
                 break
-            bad = [p for p in _edges(pairwise)
-                   if (_pair_error(pairwise, p, feats, cams) or 0.0) > PARALLAX_GATE_PX]
-            if not bad:
-                break
+            # The worst first: everything past twice the typical error, or if
+            # nothing is that far out, whatever is still over the gate.
+            cut = max(PARALLAX_GATE_PX, 2.0 * float(np.median([e for e, _ in errors])))
+            bad = [p for e, p in above if e > cut] or [p for _, p in above]
             for p in bad:
                 _drop_pair(pairwise, p)
-            stats["parallax_dropped"] = len(bad)
+            stats["parallax_dropped"] += len(bad)
             if len(_edges(pairwise)) < max(2, n // 4):
                 log.info("[orbit-worker] pose refinement: %d of %d pairs show "
-                         "parallax; keeping the sensor rotations", len(bad), len(edges))
+                         "parallax; keeping the sensor rotations",
+                         stats["parallax_dropped"], len(edges))
                 return _unchanged(rotations, stats, hfov_deg)
     except cv2.error as e:
         log.warning("[orbit-worker] pose refinement: solve failed (%s)", e)
@@ -364,10 +418,12 @@ def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
         stats["max_correction_deg"] = round(max(corrections), 2)
         stats["mean_correction_deg"] = round(float(np.mean(corrections)), 2)
         stats["max_shift_px"] = round(max(shift_sizes), 1)
-    log.info("[orbit-worker] pose refinement: %d of %d pairs used (%d dropped for "
-             "parallax), field of view %.1f deg from %d pairs, cameras moved %.1f deg "
-             "on average (worst %.1f), centres shifted up to %.0f px, %d clamped",
-             stats["pairs_used"], stats["pairs_tried"], stats["parallax_dropped"],
+    log.info("[orbit-worker] pose refinement: %d of %d pairs used (%d disagreed with "
+             "the sensor, %d dropped for parallax), field of view %.1f deg from %d "
+             "pairs, cameras moved %.1f deg on average (worst %.1f), centres shifted "
+             "up to %.0f px, %d clamped",
+             stats["pairs_used"], stats["pairs_tried"], stats["inconsistent_dropped"],
+             stats["parallax_dropped"],
              hfov_deg, stats["fov_pairs"], stats["mean_correction_deg"],
              stats["max_correction_deg"], stats["max_shift_px"], stats["clamped"])
     return out_r, out_s, hfov_deg, stats

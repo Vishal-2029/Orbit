@@ -30,6 +30,9 @@ api: ## Run the Go API on :8080
 worker: ## Run the Python CV worker
 	cd cv-worker && .venv/bin/python worker.py
 
+worker-prod: ## Run the CV worker here for the live site (Render API + Vercel), using scripts/worker.env
+	scripts/run-worker.sh
+
 web: ## Serve the web client on :5173
 	cd web && python3 serve.py
 
@@ -56,4 +59,4 @@ fmt: ## Format the Go code
 logs: ## Tail the infra logs
 	docker compose logs -f
 
-.PHONY: help up down reset migrate api worker web test build fmt logs
+.PHONY: help up down reset migrate api worker worker-prod web test build fmt logs
