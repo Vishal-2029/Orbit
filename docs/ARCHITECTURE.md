@@ -147,10 +147,36 @@ precision near the poles.
 
 `cv-worker/ops/pose_stitch.py` uses those quaternions instead of rediscovering
 the geometry from pixels. When at least 80% of a capture's photos carry a
-rotation, each one is projected straight onto the sphere with
-`cv2.PyRotationWarper("spherical")` and multi-band blended. Nothing is matched,
-so **a blank wall places exactly as reliably as a bookshelf** - which is the
-failure mode plain feature matching cannot escape.
+rotation, each one is placed straight onto the sphere and multi-band blended.
+Nothing has to be matched to place a photo, so **a blank wall places exactly as
+reliably as a bookshelf** - which is the failure mode plain feature matching
+cannot escape. (Features are still used, but only to refine the sensor poses by
+a few degrees - `ops/rotation_refine.py`.)
+
+#### Rendering onto the sphere, not warping onto a strip
+
+Placement is done by `cv-worker/ops/equirect_render.py`, the technique the
+Android Photo Sphere app (`~/360-photo-app`, `EquirectangularRenderer.kt`) uses.
+Every pixel of a fixed 360x180 canvas is a direction; for each photo that
+direction is rotated into the camera's axes and divided through by depth to find
+the pixel that saw it, and `cv2.remap` samples it.
+
+It replaced `cv2.PyRotationWarper("spherical")`, which maps photos *forwards*
+onto an open-ended strip, for three reasons:
+
+| Warper strip | Equirect render |
+|---|---|
+| The first and last photo sit at opposite ends and are never blended; `finish.py` template-matches and **cuts** "duplicate" columns (a real capture lost 539 columns on a 0.37 match) and levels a brightness step | The canvas wraps: photos touching one edge are fed to the blender again past the other edge, so the last-to-first join is a seam like any other and finishing trims nothing |
+| A pole shot warps to an unbounded tile | A pole shot is just the top or bottom rows, at most one canvas wide |
+| Size and horizon row are inferred from warp corners, then padded to 2:1 | 2:1 by construction; a row's latitude is its index |
+
+Outside each photo the tile is filled with reflected content and only the mask
+says what is real - black there leaks into the blender's coarse bands as a dark
+halo along every seam. Pixel columns follow the warper's convention, so photos
+(and hotspots saved against older panoramas) land on the same pixels as before.
+`EQUIRECT_RENDER=0` switches back to the warper; `PIVOT_RATIO` enables the app's
+body-swivel parallax correction, off by default because the measured field of
+view already absorbs most of it.
 
 OpenCV's warper wants R as **camera-to-world**, in a frame with +Y *down* and
 azimuth measured `atan2(x, z)`. Two changes of frame get there:
