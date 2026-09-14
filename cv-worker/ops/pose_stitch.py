@@ -22,6 +22,8 @@ import numpy as np
 
 from config import settings
 from ops.rotation_refine import refine_poses
+from ops.equirect_render import (blend_wrapped, footprint, render_frame,
+                                 solve_gains)
 
 log = logging.getLogger("orbit-worker")
 
@@ -69,7 +71,7 @@ def quaternion_to_matrix(x, y, z, w):
 
 
 class SphereGeometry(collections.namedtuple(
-        "SphereGeometry", "circumference_px equator_y coverage hfov_deg")):
+        "SphereGeometry", "circumference_px equator_y coverage hfov_deg wrapped")):
     """Where the world sits in a panorama this module built.
 
     circumference_px  pixels for one full turn, i.e. 2*pi*focal
@@ -77,6 +79,9 @@ class SphereGeometry(collections.namedtuple(
     coverage          uint8 mask, same size as the panorama, non-zero exactly
                       where a photograph actually landed
     hfov_deg          the field of view the photos were warped with
+    wrapped           True when the canvas is exactly one turn whose left and
+                      right edges were blended together, so finishing has no
+                      overshoot to trim and no brightness step to level
 
     The mask is the important one. Finishing used to infer coverage from the
     pixels, by calling anything near-black "no data" and anything else real.
@@ -93,7 +98,7 @@ class SphereGeometry(collections.namedtuple(
     __slots__ = ()
 
 
-SphereGeometry.__new__.__defaults__ = (None, None)   # coverage, hfov_deg optional
+SphereGeometry.__new__.__defaults__ = (None, None, False)   # coverage, hfov_deg, wrapped
 
 
 def _qmul(a, b):
@@ -285,6 +290,9 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             rotations, shifts, hfov_deg, _ = refine_poses(
                 [images[i] for i in usable], rotations, hfov_deg)
 
+        if settings.equirect_render:
+            return _stitch_equirect(images, usable, rotations, shifts, hfov_deg)
+
         # Shrink the sources so the sphere stays within budget. Done after the
         # field of view is known, because the focal length decides the size.
         _, full_focal = intrinsics(w, h, hfov_deg)
@@ -384,6 +392,72 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
     except Exception as e:
         log.warning("[orbit-worker] pose stitch %s: %s", type(e).__name__, e)
         return False, None, "Something went wrong placing the photos onto the sphere.", None
+
+
+def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
+    """Render the posed photos onto a wrapping equirectangular canvas.
+
+    The same inputs as the warper path - refined rotations, per-photo centre
+    shifts, measured field of view - painted the other way round: every canvas
+    pixel looks up the photo pixel that saw it. See ops/equirect_render.py for
+    why that fixes the wrap seam and the poles.
+    """
+    h, w = images[usable[0]].shape[:2]
+    _, full_focal = intrinsics(w, h, hfov_deg)
+
+    # Never wider than the photos can fill, never wider than the configured cap.
+    width = int(min(settings.pose_circumference_px, 2.0 * math.pi * full_focal))
+    for _ in range(6):
+        width = max(64, width - width % 2)
+        height = width // 2
+        scale = min(1.0, width / (2.0 * math.pi * full_focal))
+        sw, sh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        K, _ = intrinsics(sw, sh, hfov_deg)
+        need = 0
+        for R in rotations:
+            c0, c1, r0, r1 = footprint(R, K, sw, sh, width, height)
+            need += max(0, c1 - c0) * max(0, r1 - r0)
+        if need <= settings.pose_tile_budget_px:
+            break
+        log.info("[orbit-worker] %d photos would render to %.0f Mpx; shrinking "
+                 "the sphere from %d px around to fit the %.0f Mpx budget",
+                 len(rotations), need / 1e6, width, settings.pose_tile_budget_px / 1e6)
+        width = int(width * 0.75)
+
+    k_scale = sw / float(w)
+    tiles, masks, corners = [], [], []
+    for i, R, (dx, dy) in zip(usable, rotations, shifts):
+        img = images[i]
+        if img.shape[:2] != (sh, sw):
+            img = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+        placed = render_frame(img, R, K, width, height,
+                              shift=(dx * k_scale, dy * k_scale),
+                              pivot_ratio=settings.pivot_ratio)
+        if placed is None:
+            continue
+        tile, mask, corner = placed
+        tiles.append(tile)
+        masks.append(mask)
+        corners.append(corner)
+
+    if not tiles:
+        return False, None, "None of the photos landed on the sphere.", None
+
+    try:
+        gains = solve_gains(tiles, masks, corners, width, height)
+        for t, g in zip(tiles, gains):
+            if abs(g - 1.0) > 1e-3:
+                cv2.multiply(t, (float(g),) * 3, dst=t)
+    except Exception as e:
+        log.debug("[orbit-worker] exposure gains skipped: %s", e)
+
+    pano, cover = blend_wrapped(tiles, masks, corners, width, height,
+                                find_seams=_find_seams)
+    geom = SphereGeometry(circumference_px=float(width), equator_y=height / 2.0,
+                          coverage=cover, hfov_deg=hfov_deg, wrapped=True)
+    log.info("[orbit-worker] pose stitch rendered %d photo(s) onto a %dx%d "
+             "equirectangular sphere", len(tiles), width, height)
+    return True, pano, None, geom
 
 
 def _compensate_exposure(warped, masks, corners):

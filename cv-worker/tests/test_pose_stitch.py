@@ -408,8 +408,11 @@ def test_end_to_end_placement():
     ok, pano, reason, geom = ps.stitch_with_poses(imgs, quats)
     check("eight posed views stitch", ok is True, str(reason))
     if ok:
-        h, w = pano.shape[:2]
-        check("result spans roughly the full circle", w > 4 * h, "%dx%d" % (w, h))
+        # Measured in columns that hold a photo, not in the canvas's shape: the
+        # equirectangular renderer always returns a 2:1 sphere, where the old
+        # warper returned a strip whose width alone gave the span away.
+        span = float(geom.coverage.any(axis=0).sum()) / (geom.circumference_px / 360.0)
+        check("result spans roughly the full circle", span > 330, "%.0f degrees" % span)
 
 
 def test_large_portrait_photos_do_not_explode():

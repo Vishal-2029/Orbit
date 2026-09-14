@@ -180,6 +180,19 @@ class Settings:
     # 32-photo sphere, and it is what removes the doubled window frames.
     refine_rotations = _env("REFINE_ROTATIONS", "").lower() not in ("0", "false", "no")
 
+    # Paint posed photos straight onto a full 360x180 equirectangular canvas
+    # (ops/equirect_render.py) instead of OpenCV's spherical warper. The canvas
+    # wraps, so the seam between the last and first photo is blended like any
+    # other, and pole shots cannot explode into giant tiles. Set to 0 to go back
+    # to the warper.
+    equirect_render = _env("EQUIRECT_RENDER", "").lower() not in ("0", "false", "no")
+
+    # Lever arm over scene distance for body-swivel parallax (see
+    # equirect_render.render_frame). 0 treats the lens as the pivot. Off by
+    # default: the field of view measured from the photos already absorbs most
+    # of the uniform magnification this corrects, and applying both overshoots.
+    pivot_ratio = float(_env("PIVOT_RATIO", "0"))
+
     # Retry / backoff
     max_attempts = _envint("MAX_ATTEMPTS", 3)
     backoff_base_seconds = _envint("BACKOFF_BASE_SECONDS", 2)

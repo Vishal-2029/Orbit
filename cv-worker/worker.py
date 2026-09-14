@@ -518,9 +518,12 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
     if cover is not None:
         _debug_dump(capture_id, "coverage.png", cover)
     try:
+        # A canvas that already wraps has nothing to trim or level at the join:
+        # the last and first photo were blended together by the renderer.
         pano, info = finish_panorama(pano, circumference_px=circumference,
                                      equator_y=equator, coverage=cover,
-                                     spherical=spherical)
+                                     spherical=spherical,
+                                     wrap=not getattr(geom, "wrapped", False))
     except Exception as e:
         log.warning("%s panorama clean-up failed (%s: %s); using the raw stitch",
                     PREFIX, type(e).__name__, e)
