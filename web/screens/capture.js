@@ -243,6 +243,8 @@ const ScreenCapture = (() => {
     // and a half seconds is still well inside the time it takes somebody to
     // read the first instruction and line up the first dot.
     setTimeout(() => {
+      // Metering is only needed up to the lock; stop reading pixels after it.
+      clearInterval(meterTimer);
       lockExposure().then((locked) => {
         // Name what actually locked, not what was asked for. Some cameras take
         // exposure but refuse white balance, and a line claiming all three
@@ -365,8 +367,8 @@ const ScreenCapture = (() => {
     }
 
     function fitCanvas() {
-      const r = video.getBoundingClientRect();
-      const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+      // clientWidth/Height avoid building a full rect every frame.
+      const w = Math.max(1, video.clientWidth), h = Math.max(1, video.clientHeight);
       if (dotCanvas.width !== w || dotCanvas.height !== h) {
         dotCanvas.width = w; dotCanvas.height = h;
       }
@@ -739,37 +741,30 @@ const ScreenCapture = (() => {
       // Say nothing while things are working. The old version announced
       // "Gyroscope tracking" at every moment, which told the user nothing they
       // could act on and buried the messages that mattered.
+      let cls, text;
       if (!live) {
-        statusPill.className = "status-pill off";
-        statusPill.textContent = "No motion sensor — tap the button for each photo";
+        cls = "status-pill off";
+        text = "No motion sensor — tap the button for each photo";
       } else if (!refFrame) {
-        statusPill.className = "status-pill warn";
-        statusPill.textContent = "Point at anything and take your first photo to begin";
+        cls = "status-pill warn";
+        text = "Point at anything and take your first photo to begin";
       } else if (state.nudge && Date.now() < state.nudge.until) {
-        statusPill.className = "status-pill warn";
-        statusPill.textContent = state.nudge.text;
+        cls = "status-pill warn";
+        text = state.nudge.text;
       } else if (state.aim && state.aim.slot && !state.aim.steady) {
         // On the dot but still moving: the one thing standing between the
         // user and the shot, so it is worth a word.
-        statusPill.className = "status-pill warn";
-        statusPill.textContent = "Hold still…";
+        cls = "status-pill warn";
+        text = "Hold still…";
       } else {
-        statusPill.className = "status-pill hidden";
-        statusPill.textContent = "";
+        cls = "status-pill hidden";
+        text = "";
       }
-      setFrontBtn.hidden = !live || !refFrame;
-
-      const t = liveTarget || nextSlot();
-      const need = plan.min_required || 1;
-      const ringLeft = ringSlots.filter((s) => !state.shots.has(s.id)).length;
-
-      // What to do next is already on screen three times over: the coverage
-      // note under the button says what is left, each dot carries its own
-      // label, and the two gauges show what is missing in each axis. A
-      // full-width banner saying it a fourth time only covered the gauges up.
-      void t;
-      void need;
-      void ringLeft;
+      // This runs every frame; only touch the DOM when something changed.
+      if (statusPill.className !== cls) statusPill.className = cls;
+      if (statusPill.textContent !== text) statusPill.textContent = text;
+      const frontHidden = !live || !refFrame;
+      if (setFrontBtn.hidden !== frontHidden) setFrontBtn.hidden = frontHidden;
     }
 
     function renderThumbs() {
@@ -777,6 +772,15 @@ const ScreenCapture = (() => {
         .filter((s) => state.shots.has(s.id))
         .map((s) => `<img src="${state.shots.get(s.id).url}" alt="${escapeHtml(s.label)}" />`)
         .join("");
+    }
+
+    // One new thumbnail, without re-decoding every photo already in the strip.
+    function addThumb(slot, shot) {
+      const img = document.createElement("img");
+      img.src = shot.url;
+      img.alt = slot.label || "";
+      img.decoding = "async";
+      thumbStrip.appendChild(img);
     }
 
     function updateFinishState() {
@@ -947,17 +951,10 @@ const ScreenCapture = (() => {
       return new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
     }
 
-    async function grabFrame() {
-      const ic = stillCapture();
-      if (ic) {
-        try {
-          const blob = await ic.takePhoto();
-          if (blob && blob.size) return blob;
-        } catch (e) {
-          // Not worth paying for a failing call on every remaining shot.
-          imageCapture = false;
-        }
-      }
+    // Video frames only: takePhoto() reconfigures the camera and can stall the
+    // shutter for most of a second. An instant shutter was chosen over the
+    // slightly cleaner still. stillCapture() is kept should that be revisited.
+    function grabFrame() {
       return grabVideoFrame();
     }
 
@@ -983,34 +980,52 @@ const ScreenCapture = (() => {
           quat = q;
         }
 
-        const saved = await OrbitAPI.uploadPhoto(captureId, {
-          blob, index: slot.index, slotId: slot.id,
-          yaw, pitch, hasHeading: quat != null, quat,
-          source: quat != null ? tracker.source : "none",
-        });
-
+        // The shot counts the moment the photo exists; the upload runs in the
+        // background. Waiting for the network here held the shutter locked for
+        // seconds on a phone connection, which read as a laggy camera.
         const url = URL.createObjectURL(blob);
-        state.shots.set(slot.id, { blob, url, index: slot.index, yaw, pitch, quat });
-        // Shooting the same direction twice is worth mentioning - it spends a
-        // shot without buying any coverage - but the photo is kept, so this is
-        // a note beside a saved photo, not a rejection. It used to come back as
-        // a 409 that threw the shot away.
-        if (saved && saved.warning) {
-          errBox.classList.add("warn");
-          errBox.innerHTML =
-            `<strong>Same direction as before.</strong><br>${escapeHtml(saved.warning)}`;
-        } else {
-          errBox.textContent = "";
-          errBox.classList.remove("warn");
-        }
-        renderThumbs(); updateFinishState(); updateGhost(); renderStatus();
+        const shot = { blob, url, index: slot.index, yaw, pitch, quat };
+        state.shots.set(slot.id, shot);
+        errBox.textContent = "";
+        errBox.classList.remove("warn");
+        addThumb(slot, shot); updateFinishState(); updateGhost(); renderStatus();
+        shot.upload = uploadShot(slot, shot);
       } catch (e) {
         errBox.classList.remove("warn");
-        errBox.textContent = "Could not save that photo: " + e.message;
+        errBox.textContent = "Could not take that photo: " + e.message;
       } finally {
         firing = false;
         shutter.disabled = false;
       }
+    }
+
+    const pendingUploads = new Set();
+    function uploadShot(slot, shot) {
+      const p = OrbitAPI.uploadPhoto(captureId, {
+        blob: shot.blob, index: slot.index, slotId: slot.id,
+        yaw: shot.yaw, pitch: shot.pitch, hasHeading: shot.quat != null, quat: shot.quat,
+        source: shot.quat != null ? tracker.source : "none",
+      }).then((saved) => {
+        // Shooting the same direction twice is worth mentioning - it spends a
+        // shot without buying any coverage - but the photo is kept, so this is
+        // a note beside a saved photo, not a rejection.
+        if (saved && saved.warning) {
+          errBox.classList.add("warn");
+          errBox.innerHTML =
+            `<strong>Same direction as before.</strong><br>${escapeHtml(saved.warning)}`;
+        }
+      }).catch((e) => {
+        // Put the dot back so the user can shoot it again.
+        if (state.shots.get(slot.id) === shot) {
+          URL.revokeObjectURL(shot.url);
+          state.shots.delete(slot.id);
+          renderThumbs(); updateFinishState(); updateGhost(); renderStatus();
+        }
+        errBox.classList.remove("warn");
+        errBox.textContent = "Could not save that photo: " + e.message;
+      }).finally(() => { pendingUploads.delete(p); });
+      pendingUploads.add(p);
+      return p;
     }
 
     function flash() {
@@ -1059,6 +1074,11 @@ const ScreenCapture = (() => {
       finishBtn.disabled = true;
       finishBtn.textContent = "Starting…";
       try {
+        if (pendingUploads.size) {
+          finishBtn.textContent = "Saving photos…";
+          await Promise.allSettled([...pendingUploads]);
+          if (state.shots.size === 0) throw new Error("No photos were saved.");
+        }
         await OrbitAPI.process(captureId);
         Router.navigate(`#/processing/${captureId}`);
       } catch (e) {
