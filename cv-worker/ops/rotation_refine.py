@@ -88,7 +88,11 @@ BA_MAX_ITER = 60
 
 # Range the field of view may be measured in, and the least number of pairs
 # the measurement needs before it is believed over the default.
-FOV_RANGE_DEG = (50, 75)
+# Wide on purpose. It was 50-75, and a phone that hands the browser a 21:9
+# video mode (1920x824, sides cropped off) sees about 43 degrees across: the
+# measurement could never find it, the default 63 stood, every photo was painted
+# half as large again as it really is, and the whole sphere came out doubled.
+FOV_RANGE_DEG = (30, 80)
 FOV_MIN_PAIRS = 3
 # How close to a pure rotation a pair's homography must come, at its best field
 # of view, to count towards measuring it. A stabilised or parallax pair never
@@ -198,6 +202,52 @@ def estimate_hfov(pairwise, width, height, default_deg):
     if best <= FOV_RANGE_DEG[0] or best >= FOV_RANGE_DEG[1]:
         return default_deg, len(scores)
     return best, len(scores)
+
+
+def sensor_hfov(pairwise, rotations, width, height):
+    """The field of view at which the photos turn by as much as the gyro says.
+
+    estimate_hfov asks for pairs that are nearly pure rotations, and a small
+    room shot handheld rarely offers three: near walls carry parallax. This
+    asks something easier. For each matched pair the gyro knows the angle
+    between the two shots; a too-wide field of view makes the photos imply a
+    smaller turn, a too-narrow one a larger. The field of view at which the two
+    agree is the camera's, and the median over pairs shrugs off the odd bad
+    match. Returns (hfov_deg or None, pairs counted).
+    """
+    fovs = np.arange(FOV_RANGE_DEG[0], FOV_RANGE_DEG[1] + 0.25, 0.5)
+    Ks = []
+    for f in fovs:
+        K = _pinhole(width, height, f)[0]
+        K[0, 2] = K[1, 2] = 0.0             # the matcher's homographies are centred
+        Ks.append(K)
+    found = []
+    for p in _edges(pairwise):
+        m = pairwise[p]
+        H = m.H
+        if H is None or np.asarray(H).shape != (3, 3):
+            continue
+        sensor = _angle_between(rotations[m.dst_img_idx], rotations[m.src_img_idx])
+        if sensor < 10.0:                   # too small a turn to measure against
+            continue
+        best = None
+        for fov, K in zip(fovs, Ks):
+            M = np.linalg.inv(K) @ np.asarray(H, np.float64) @ K
+            det = np.linalg.det(M)
+            if not np.isfinite(det) or abs(det) < 1e-12:
+                continue
+            M = M / np.cbrt(det)
+            R = _project_to_so3(M).astype(np.float64)
+            if np.linalg.norm(M - R) > 0.2:  # not a rotation at this fov at all
+                continue
+            gap = abs(_angle_between(np.eye(3), R) - sensor)
+            if best is None or gap < best[0]:
+                best = (gap, float(fov))
+        if best and best[0] < 2.0 and FOV_RANGE_DEG[0] < best[1] < FOV_RANGE_DEG[1]:
+            found.append(best[1])
+    if len(found) < FOV_MIN_PAIRS:
+        return None, len(found)
+    return float(np.median(found)), len(found)
 
 
 def _camera(R, focal, cx, cy):
@@ -323,6 +373,15 @@ def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
     except cv2.error as e:
         log.warning("[orbit-worker] pose refinement: features unavailable (%s)", e)
         return _unchanged(rotations, stats, hfov_deg)
+
+    if measure_fov:
+        # Before the consistency check: that check judges pairs at a field of
+        # view, and at a wrong one every good pair looks inconsistent.
+        measured, n_sensor = sensor_hfov(pairwise, rotations, sw, sh)
+        if measured is not None:
+            log.info("[orbit-worker] field of view %.1f deg from the gyro over %d "
+                     "pairs (assumed %.1f)", measured, n_sensor, hfov_deg)
+            hfov_deg = measured
 
     stats["inconsistent_dropped"] = _drop_inconsistent_pairs(
         pairwise, rotations, sw, sh, hfov_deg, 2.0 * max_correction_deg)

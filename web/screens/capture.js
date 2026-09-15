@@ -81,7 +81,15 @@ const ScreenCapture = (() => {
     // --- camera ---
     try {
       state.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 } },
+        // Width AND height. With width alone some phones pick a 21:9 mode
+        // (1920x824) that crops the sides away: about 43 degrees of view
+        // instead of the 63 the dots and the stitcher are built for, and the
+        // finished sphere comes out doubled everywhere.
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 }, height: { ideal: 1080 },
+          aspectRatio: { ideal: 16 / 9 },
+        },
         audio: false,
       });
       video.srcObject = state.stream;
