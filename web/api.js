@@ -110,8 +110,18 @@ const OrbitAPI = (() => {
     deleteHotspot(hotspotId) {
       return req("DELETE", `/api/v1/hotspots/${hotspotId}`);
     },
-    imageURL(id, kind, idx) {
-      return `${base()}/api/v1/captures/${id}/image/${kind}/${idx}`;
+    // version stamps the URL so a rebuilt picture is fetched rather than served
+    // from cache. These images are replaced in place at a fixed URL, and they
+    // are sent with a year's immutable caching, so without it a rebuild shows
+    // the old photo forever. Pass the capture's updated_at.
+    imageURL(id, kind, idx, version) {
+      const v = version ? `?v=${encodeURIComponent(version)}` : "";
+      return `${base()}/api/v1/captures/${id}/image/${kind}/${idx}${v}`;
+    },
+    // Seconds, to match the stamp the server puts in manifest URLs.
+    cacheStamp(capture) {
+      const t = Date.parse(capture && capture.updated_at);
+      return Number.isFinite(t) ? Math.floor(t / 1000) : "";
     },
     panoramaURL(id) {
       return `${base()}/api/v1/captures/${id}/image/panorama`;

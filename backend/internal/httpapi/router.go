@@ -465,7 +465,19 @@ func (s *Server) streamObject(c *fiber.Ctx, bucket, key string) error {
 		return fiber.NewError(fiber.StatusNotFound, "image not found: "+key)
 	}
 	c.Set("Content-Type", "image/jpeg")
-	c.Set("Cache-Control", "public, max-age=31536000, immutable")
+	// A year of immutable caching is right only for a URL that changes when the
+	// picture does. These keys are rewritten in place by every rebuild, so the
+	// promise is only true once ?v identifies the build - which PublicURL and
+	// the tile template now put there.
+	//
+	// Without it the browser is entitled to never ask again, and it doesn't:
+	// that is why rebuilding a capture appeared to change nothing, whatever the
+	// stitcher had actually produced. An unversioned URL revalidates instead.
+	if c.Query("v") != "" {
+		c.Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		c.Set("Cache-Control", "no-cache")
+	}
 	return c.SendStream(rc)
 }
 

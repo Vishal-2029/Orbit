@@ -155,7 +155,7 @@ const ScreenHome = (() => {
       : c.status === "failed" ? "failed"
       : (c.status === "processing" || c.status === "queued") ? "processing" : "";
     const thumb = (c.status === "ready" || c.status === "partial")
-      ? `background-image:url('${OrbitAPI.imageURL(c.id, "thumb", 0)}')` : "";
+      ? `background-image:url('${OrbitAPI.imageURL(c.id, "thumb", 0, OrbitAPI.cacheStamp(c))}')` : "";
     return `
       <div class="capture-row" data-id="${c.id}" style="cursor:pointer">
         <div class="thumb" style="${thumb}"></div>

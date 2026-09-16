@@ -291,7 +291,7 @@ func (s *Capture) sceneFor(ctx context.Context, id string, self *domain.Capture,
 		ID:       c.ID,
 		Slug:     c.Slug,
 		Title:    c.Title,
-		Panorama: s.PublicURL(c.ID, "panorama", 0),
+		Panorama: s.PublicURL(c.ID, "panorama", 0, c.UpdatedAt.Unix()),
 		Hotspots: hs,
 	}
 

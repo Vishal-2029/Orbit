@@ -82,6 +82,11 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		Mode: c.Mode, Direction: c.Settings.Direction, FrameCount: len(done),
 	}
 
+	// Stamps every image URL in this manifest so a rebuild's pictures arrive at
+	// URLs the browser has not cached. ResetForReprocess touches updated_at as
+	// the rebuild starts, so this differs from the last build's stamp.
+	ver := c.UpdatedAt.Unix()
+
 	// Everything except spin produces a sphere when the stitch works; spin is
 	// a frame sequence by design.
 	//
@@ -99,14 +104,14 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 	switch {
 	case wantsSphere && in.Stitched && in.PanoramaKey != "" && enoughCoverage:
 		m.Renderer = "sphere"
-		m.Panorama = s.PublicURL(captureID, "panorama", 0)
+		m.Panorama = s.PublicURL(captureID, "panorama", 0, ver)
 		m.Width, m.Height = in.Width, in.Height
 		m.Coverage = in.SphereCoverage
 		if len(in.TileLevels) > 0 {
 			// A URL TEMPLATE, not a URL. The viewer expands {z}, {f}, {y} and
 			// {x} per tile, so the placeholders have to survive into the
 			// manifest exactly as written and must match storage.TileKey.
-			m.Tiles = fmt.Sprintf("/api/v1/captures/%s/tiles/{z}/{f}/{y}/{x}.jpg", captureID)
+			m.Tiles = fmt.Sprintf("/api/v1/captures/%s/tiles/{z}/{f}/{y}/{x}.jpg?v=%d", captureID, ver)
 			m.Levels = in.TileLevels
 		}
 		// Photos cannot cover ground the camera never pointed at. Say how much
@@ -138,8 +143,8 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		// Frame-swap fallback (and the normal path for spin mode).
 		m.Renderer = "frames"
 		for _, f := range done {
-			m.Frames = append(m.Frames, s.PublicURL(captureID, "processed", f.Index))
-			m.Previews = append(m.Previews, s.PublicURL(captureID, "thumb", f.Index))
+			m.Frames = append(m.Frames, s.PublicURL(captureID, "processed", f.Index, ver))
+			m.Previews = append(m.Previews, s.PublicURL(captureID, "thumb", f.Index, ver))
 			m.Yaws = append(m.Yaws, f.Yaw)
 			m.Pitches = append(m.Pitches, f.Pitch)
 		}

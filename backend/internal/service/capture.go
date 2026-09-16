@@ -352,9 +352,19 @@ func (s *Capture) Delete(ctx context.Context, id string) error {
 
 // PublicURL builds the URL the viewer uses to fetch an image. Images are
 // served back through the API so the object store never needs to be exposed.
-func (s *Capture) PublicURL(captureID, kind string, idx int) string {
-	if kind == "panorama" {
-		return fmt.Sprintf("%s/api/v1/captures/%s/image/panorama", s.cfg.PublicBaseURL, captureID)
+// version is a cache key and nothing else - no handler reads it. These images
+// are MUTABLE at a fixed URL: rebuilding a capture writes a new panorama, new
+// tiles and new thumbnails over the same keys. They are served with a year's
+// immutable caching, so without something in the URL that changes per build, a
+// browser that has seen the old one never asks for the new one - and a rebuild
+// looks like it did nothing at all, however different the file on the server.
+func (s *Capture) PublicURL(captureID, kind string, idx int, version int64) string {
+	v := ""
+	if version > 0 {
+		v = fmt.Sprintf("?v=%d", version)
 	}
-	return fmt.Sprintf("%s/api/v1/captures/%s/image/%s/%d", s.cfg.PublicBaseURL, captureID, kind, idx)
+	if kind == "panorama" {
+		return fmt.Sprintf("%s/api/v1/captures/%s/image/panorama%s", s.cfg.PublicBaseURL, captureID, v)
+	}
+	return fmt.Sprintf("%s/api/v1/captures/%s/image/%s/%d%s", s.cfg.PublicBaseURL, captureID, kind, idx, v)
 }
