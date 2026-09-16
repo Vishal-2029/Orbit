@@ -362,8 +362,39 @@ def refine_poses(images, rotations, hfov_deg, work_width=WORK_WIDTH,
             ft.img_idx = i
             feats.append(ft)
 
-        pairs = _pairs_to_try(rotations, hfov_deg)
+        # BestOf2NearestMatcher asks FLANN for the TWO nearest neighbours of
+        # every descriptor, and FLANN asserts rather than returns when the
+        # index it is searching holds fewer than two - "(size_t)knn <=
+        # index_->size()". The trigger is a photo with EXACTLY ONE descriptor:
+        # none at all is handled quietly, one is not. A nearly featureless
+        # shot - an evenly lit ceiling, a blank wall with a single mark on it -
+        # lands there.
+        #
+        # Because the matcher is handed every photo at once, that one photo
+        # took the whole capture down: the except below caught the assertion
+        # and returned the unrefined sensor rotations for ALL of them. A
+        # 32-photo sphere lost its drift correction because one shot was of a
+        # ceiling.
+        #
+        # Two is the floor the assertion imposes; a photo under it cannot be
+        # matched anyway, so it is left out of the pairs and the rest are
+        # still refined.
+        min_descriptors = 2
+        usable = [len(ft.keypoints) >= min_descriptors for ft in feats]
+        if not all(usable):
+            log.info("[orbit-worker] pose refinement: %d of %d photos have too "
+                     "little detail to match (indices %s); refining the rest",
+                     usable.count(False), n,
+                     [i for i, ok in enumerate(usable) if not ok])
+
+        pairs = [(i, j) for i, j in _pairs_to_try(rotations, hfov_deg)
+                 if usable[i] and usable[j]]
         stats["pairs_tried"] = len(pairs)
+        if not pairs:
+            log.info("[orbit-worker] pose refinement: no two overlapping photos "
+                     "carry enough detail to match; keeping the sensor rotations")
+            return _unchanged(rotations, stats, hfov_deg)
+
         mask = np.zeros((n, n), np.uint8)
         for i, j in pairs:
             mask[i, j] = mask[j, i] = 1

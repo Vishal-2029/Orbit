@@ -201,5 +201,45 @@ _, _, fov, stats_f = refine_poses(imgs_f, truth, 63.0)
 check("the field of view is measured, not assumed", abs(fov - 58.0) <= 1.0,
       "%.1f deg from %d pairs" % (fov, stats_f["fov_pairs"]))
 
+print("\ntest_one_featureless_photo_does_not_cost_the_others_their_refinement:")
+# A photo yielding EXACTLY ONE descriptor makes FLANN's k=2 search assert -
+# "(size_t)knn <= index_->size()". None at all is handled quietly; one is not,
+# and an evenly lit ceiling lands right there. The matcher is handed every
+# photo at once, so that single shot used to return the unrefined sensor
+# rotations for the entire capture.
+#
+# Exactly one descriptor cannot be had reliably from image content - a blank
+# frame gives none and the smallest mark gives several - so the detector is
+# swapped for that one photo, which is the condition itself rather than an
+# imitation of it.
+_real_features = cv2.detail.computeImageFeatures2
+_one_only = cv2.SIFT_create(nfeatures=1)
+BAD = 5
+_calls = {"n": 0}
+
+
+def _one_descriptor_for_bad(finder, img):
+    i = _calls["n"]
+    _calls["n"] += 1
+    return _real_features(_one_only if i == BAD else finder, img)
+
+
+cv2.detail.computeImageFeatures2 = _one_descriptor_for_bad
+try:
+    rots_b, _, _, stats_b = refine_poses(imgs, sensor, HFOV, measure_fov=False)
+finally:
+    cv2.detail.computeImageFeatures2 = _real_features
+
+check("the capture is still refined, not abandoned", stats_b["pairs_used"] > 0,
+      str(stats_b))
+_others = [i for i in range(len(truth)) if i != BAD]
+after_b = residuals([truth[i] for i in _others], [rots_b[i] for i in _others])
+base_b = residuals([truth[i] for i in _others], [sensor[i] for i in _others])
+print("       sensor error mean %.2f deg -> refined %.2f deg"
+      % (np.mean(base_b), np.mean(after_b)))
+check("the other photos keep the correction the bad one cost them",
+      np.mean(after_b) < np.mean(base_b) * 0.5,
+      "%.2f -> %.2f" % (np.mean(base_b), np.mean(after_b)))
+
 print("\n%d failure(s)" % fail_n)
 sys.exit(1 if fail_n else 0)
