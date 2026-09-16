@@ -50,6 +50,20 @@ MATCH_CONF = 0.3
 # How sure the bundle adjuster must be about a photo before it keeps it.
 BUNDLE_CONF = 1.0
 
+# How sure two photos must be of EACH OTHER to count as connected when working
+# out which ones belong to the same scene. This is a different question from
+# MATCH_CONF above, and answering it with MATCH_CONF was a mistake: at 0.3 a
+# pair of unrelated photos that happen to share a few features - a blank wall,
+# a patch of sky, a repeated railing - is enough to link them, so the "largest
+# overlapping group" swallowed everything and nothing was ever dropped.
+#
+# On a real 12-photo set covering two different places, 0.3 kept all twelve and
+# the solver was asked to fit a stairwell and a balcony onto one sphere; the
+# result was a mostly-black panorama with the photos scattered around it. At
+# 1.0 - the threshold OpenCV's own stitching pipeline uses for this step - the
+# six photos of one scene come out on their own and stitch cleanly.
+CONNECT_CONF = BUNDLE_CONF
+
 
 def _find_features(images):
     """SIFT where it exists, ORB otherwise.
@@ -98,11 +112,31 @@ def _estimate_cameras(features, pairwise):
     mask[0, 0] = mask[0, 1] = mask[0, 2] = mask[1, 1] = mask[1, 2] = 1
     adjuster.setRefinementMask(mask)
 
-    ok, cameras = adjuster.apply(features, pairwise, cameras)
-    if not ok or not cameras:
-        return None, ("The camera angles could not be reconciled into one sphere "
-                      "- try keeping the phone level and at the same height for "
-                      "every shot.")
+    # Refinement is an IMPROVEMENT on the estimator's answer, not a
+    # precondition for having one. BundleAdjusterRay solves every rotation at
+    # once, so one irreconcilable photo fails the whole solve - and a set that
+    # spans two different places (half a stairwell, half a balcony) is
+    # irreconcilable by construction, because no single sphere contains both.
+    # Returning nothing there threw away rotations that were perfectly good:
+    # on a real 12-photo set the adjuster failed at every confidence threshold
+    # tried, while the unrefined cameras warped and blended into a clean
+    # panorama.
+    #
+    # So a failed refinement is treated the way failed wave correction already
+    # is - noted and stepped over. The photos that genuinely cannot be joined
+    # are still refused, by the overlap check before this and the coverage
+    # check after it, which is where that judgement belongs.
+    refined_ok, refined = False, None
+    try:
+        refined_ok, refined = adjuster.apply(features, pairwise, cameras)
+    except cv2.error as e:
+        log.debug("[orbit-worker] bundle adjustment raised: %s", e)
+
+    if refined_ok and refined:
+        return refined, None
+
+    log.info("[orbit-worker] bundle adjustment did not converge; keeping the "
+             "estimator's rotations")
     return cameras, None
 
 
@@ -132,7 +166,7 @@ def _biggest_overlapping_group(images):
 
     try:
         keep = list(np.array(cv2.detail.leaveBiggestComponent(
-            features, pairwise, MATCH_CONF)).ravel())
+            features, pairwise, CONNECT_CONF)).ravel())
     except Exception as e:
         log.debug("[orbit-worker] component search skipped: %s", e)
         keep = list(range(len(images)))

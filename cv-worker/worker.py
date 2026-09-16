@@ -721,6 +721,30 @@ def handle_finalize_job(mc, job, attempt=1):
     # bookshelf. _pose_of falls back to the recorded heading and tilt, so this
     # now covers guided captures from phones that never gave up a quaternion.
     quats = [_pose_of(f) for f in ring]
+
+    # A missing heading is not stored as missing. The upload handler defaults
+    # the yaw and pitch form fields to "0" (backend/internal/httpapi/router.go),
+    # so a photo sent with no orientation at all comes back claiming it was shot
+    # dead ahead at the horizon, and _pose_of turns that into a perfectly valid
+    # rotation. A free upload of twelve such photos is therefore twelve
+    # IDENTICAL rotations, which the pose path faithfully places on top of one
+    # another: a 63-degree wedge instead of a turn, duly degraded to the frame
+    # viewer without feature matching - the path these photos actually need -
+    # ever being tried.
+    #
+    # Two photos of the same scene at the same heading are the same photo, so a
+    # capture whose every heading matches is a capture where nothing recorded
+    # one. Sensor quaternions are exempt: an all-zero one is already rejected by
+    # _quat_of, and a real one that repeats is a genuine measurement.
+    if (len(ring) > 1
+            and not any(_quat_of(f) is not None for f in ring)
+            and len({(round(float(f.get("yaw") or 0.0), 3),
+                      round(float(f.get("pitch") or 0.0), 3)) for f in ring}) == 1):
+        log.info("%s capture=%s: all %d photos report the same heading, so none "
+                 "was recorded; matching features instead of stacking them",
+                 PREFIX, capture_id, len(ring))
+        quats = [None] * len(quats)
+
     posed = sum(1 for q in quats if q is not None)
 
     # posed >= 1: a lone photo can only be placed by its rotation — feature
