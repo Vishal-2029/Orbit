@@ -3,6 +3,7 @@
 //   #/                -> home
 //   #/capture/:id      -> capture screen
 //   #/processing/:id   -> processing screen
+//   #/restitch/:id     -> review the photos, then build again
 //   #/view/:slug       -> viewer (by slug, public share link)
 //   #/view-id/:id      -> viewer (by capture id, used right after finishing)
 const Router = (() => {
@@ -29,6 +30,8 @@ const Router = (() => {
         currentCleanup = await ScreenCapture.mount(app, parts[1]);
       } else if (parts[0] === "processing" && parts[1]) {
         currentCleanup = await ScreenProcessing.mount(app, parts[1]);
+      } else if (parts[0] === "restitch" && parts[1]) {
+        currentCleanup = await ScreenRestitch.mount(app, parts[1]);
       } else if (parts[0] === "view" && parts[1]) {
         currentCleanup = await ScreenViewer.mount(app, { slug: parts[1] });
       } else if (parts[0] === "view-id" && parts[1]) {

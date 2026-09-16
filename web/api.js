@@ -85,6 +85,12 @@ const OrbitAPI = (() => {
     listFrames(id) {
       return req("GET", `/api/v1/captures/${id}/frames`);
     },
+    // Hold one photo back from the next build, or put it back. Nothing is
+    // deleted. Returns the whole frame list as the server now holds it, so the
+    // caller redraws from that rather than from what it assumed its click did.
+    setFrameExcluded(id, index, excluded) {
+      return req("PATCH", `/api/v1/captures/${id}/frames/${index}`, { excluded });
+    },
     getManifest(id) {
       return req("GET", `/api/v1/captures/${id}/manifest`);
     },

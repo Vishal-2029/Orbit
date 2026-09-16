@@ -180,11 +180,38 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 .row-rebuild:disabled,
 .row-download:disabled { opacity: .45; cursor: default; transform: none; }
 
+/* The restitch screen says what its button does in words: "Remove" and "Put
+   back" are opposites, and no single glyph tells them apart - getting it wrong
+   there costs you a photo out of the 360. Words need a pill rather than the
+   30px circle the icon buttons above use. */
+.row-toggle {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 7px 12px;
+  border: 0; border-radius: 999px;
+  background: rgba(255,255,255,.07);
+  color: #9aa4b2;
+  font-size: .82rem; line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.row-toggle:hover,
+.row-toggle:focus-visible {
+  background: rgba(96,141,255,.20);
+  color: #9ab6ff;
+  outline: none;
+}
+.row-toggle:disabled { opacity: .45; cursor: default; }
+
 /* Touch targets need to be bigger than the visual circle on a phone. */
 @media (pointer: coarse) {
   .row-delete,
   .row-rebuild,
   .row-download { width: 38px; height: 38px; font-size: 22px; }
+  /* The pill grows by padding rather than a fixed size: its width follows its
+     words, which change between "Remove" and "Put back". */
+  .row-toggle { padding: 11px 15px; font-size: .88rem; }
 }
 
 .capture-row.confirming {

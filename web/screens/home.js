@@ -101,11 +101,21 @@ const ScreenHome = (() => {
     }
   }
 
-  // "partial" means it fell back rather than stitched, and "failed" means it
-  // did not finish at all. Both usually come down to the run, not the photos,
-  // so both are worth another attempt without walking into the capture first.
+  // Anything that has finished can be built again, "ready" included.
+  //
+  // The server never refused it: Process resets the capture and re-queues every
+  // frame whatever state it was in - ResetForReprocess exists for exactly this.
+  // Offering the button only on "partial" and "failed" was the UI inventing a
+  // restriction, and an unhelpful one, because the stitching pipeline keeps
+  // changing underneath captures that already finished. A sphere stitched by
+  // last week's code is precisely what you want to rebuild with this week's,
+  // and that was the one row without the button.
+  //
+  // "queued" and "processing" stay out: they are already building, and a second
+  // run would fight the first. A draft is still being shot, so it is not here
+  // either - that row walks into the capture screen instead.
   function canRebuild(c) {
-    return c.status === "partial" || c.status === "failed";
+    return c.status === "ready" || c.status === "partial" || c.status === "failed";
   }
 
   // Only a finished sphere has a panorama file to hand over. "partial" still
@@ -172,17 +182,14 @@ const ScreenHome = (() => {
       if (!download.disabled) downloadPanorama(c, download);
     });
     const rebuild = row.querySelector(".row-rebuild");
-    if (rebuild) rebuild.addEventListener("click", async (ev) => {
+    if (rebuild) rebuild.addEventListener("click", (ev) => {
       ev.stopPropagation();   // don't open the capture we're rebuilding
-      rebuild.disabled = true;
-      try {
-        await OrbitAPI.process(c.id);
-        // Watch it from the processing screen, the same as a first build.
-        Router.navigate(`#/processing/${c.id}`);
-      } catch (e) {
-        rebuild.disabled = false;
-        row.querySelector(".s").textContent = "Could not start: " + e.message;
-      }
+      // Show the photos first rather than rebuilding on the spot. A rebuild
+      // from exactly the same photos gives exactly the same 360 unless the
+      // pipeline changed underneath it; the reason to rebuild is usually that
+      // one or two photos are spoiling it, and that is a decision you have to
+      // SEE the photos to make.
+      Router.navigate(`#/restitch/${c.id}`);
     });
   }
 
