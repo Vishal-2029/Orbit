@@ -270,6 +270,40 @@ def test_a_gap_in_the_middle_is_not_a_full_turn():
     check("and it is not offered as a sphere", not info.full_turn, str(info))
 
 
+def test_a_dark_panorama_is_lifted_and_a_good_one_is_left_alone():
+    """Exposure is corrected HERE, on the finished sphere, not on the way in.
+
+    Brightening each photo separately is what normalize_color's CLAHE does for
+    the display copies, and being per-photo is exactly what stops two shots of
+    the same wall agreeing under feature matching. One curve over one finished
+    image has nothing left to disagree with.
+    """
+    rng = np.random.RandomState(5)
+    dark = np.clip(rng.normal(40, 12, (400, 800, 3)), 0, 255).astype(np.uint8)
+    mask = np.zeros((400, 800), np.uint8)
+    mask[80:320, :] = 255
+    dark[:80] = 0          # polar caps the camera never pointed at
+    dark[320:] = 0
+
+    out, _ = F.auto_brighten(dark, mask)
+    before = float(np.median(cv2.cvtColor(dark, cv2.COLOR_BGR2GRAY)[mask > 0]))
+    after = float(np.median(cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)[mask > 0]))
+    check("a dark room is lifted", after > before + 30,
+          "%.0f -> %.0f" % (before, after))
+
+    # Measured over the photographed part only. Counting the caps would drag
+    # the median down and blow out the real picture to compensate - and lifting
+    # them turns an unphotographed ceiling into grey mush that reads as finished.
+    check("unphotographed black stays black",
+          out[:80].max() == 0 and out[320:].max() == 0,
+          "caps max %d/%d" % (out[:80].max(), out[320:].max()))
+
+    good = np.clip(rng.normal(140, 20, (400, 800, 3)), 0, 255).astype(np.uint8)
+    same, exponent = F.auto_brighten(good)
+    check("a well-exposed panorama is untouched",
+          bool((same == good).all()) and exponent == 1.0, "exponent %.2f" % exponent)
+
+
 if __name__ == "__main__":
     for fn in [test_fast_crop_matches_exact_and_is_much_quicker,
                test_small_images_use_the_exact_search,
@@ -282,7 +316,8 @@ if __name__ == "__main__":
                test_a_partial_capture_is_refused,
                test_a_real_overshoot_is_still_trimmed,
                test_a_capture_straddling_the_seam_is_measured_by_coverage,
-               test_a_gap_in_the_middle_is_not_a_full_turn]:
+               test_a_gap_in_the_middle_is_not_a_full_turn,
+               test_a_dark_panorama_is_lifted_and_a_good_one_is_left_alone]:
         print("\n%s:" % fn.__name__)
         fn()
     print("\n%d failure(s)" % len(FAILURES))

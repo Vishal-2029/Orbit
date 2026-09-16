@@ -33,18 +33,55 @@ const ScreenRestitch = (() => {
     return `${facing(f.yaw)}${tilt(f.pitch)} · ${y}°, ${p >= 0 ? "+" : ""}${p}°`;
   }
 
-  function rowHtml(f, n) {
+  // Deciding whether a photo is blurred, or of the wrong room, cannot be done
+  // from a 56px square. Tapping one opens the full original - the actual upload,
+  // not the downscaled copy the stitcher works from.
+  let lightbox = null;
+
+  function closeLightbox() {
+    if (!lightbox) return;
+    document.removeEventListener("keydown", onLightboxKey);
+    lightbox.remove();
+    lightbox = null;
+  }
+
+  function onLightboxKey(e) {
+    if (e.key === "Escape") closeLightbox();
+  }
+
+  function openLightbox(src, label) {
+    closeLightbox();
+    lightbox = document.createElement("div");
+    lightbox.className = "lightbox";
+    lightbox.innerHTML = `
+      <button class="lightbox-close" aria-label="Close photo">×</button>
+      <img src="${src}" alt="${escapeHtml(label)}">
+      <div class="lightbox-label">${escapeHtml(label)}</div>`;
+    // Anywhere closes it, the image included: this is a look, not a workspace,
+    // and hunting for a close button on a phone is worse than the odd
+    // accidental dismissal.
+    lightbox.addEventListener("click", closeLightbox);
+    document.addEventListener("keydown", onLightboxKey);
+    document.body.appendChild(lightbox);
+  }
+
+  function rowHtml(f, n, ver) {
     // The thumbnail is served from the index, so it is there whenever the
     // capture has been built once. onerror falls back to the original upload
     // for a capture that never finished a build and has no thumbnail yet.
-    const thumb = OrbitAPI.imageURL(f.capture_id, "thumb", f.index);
+    //
+    // ver stamps the thumbnail because a rebuild rewrites it in place; the
+    // original never changes once uploaded, so it does not need one.
+    const thumb = OrbitAPI.imageURL(f.capture_id, "thumb", f.index, ver);
     const full = OrbitAPI.imageURL(f.capture_id, "original", f.index);
     const off = f.excluded;
     return `
       <div class="capture-row" data-idx="${f.index}" style="${off ? "opacity:.45" : ""}">
-        <img class="thumb" src="${thumb}" alt="Photo ${n}"
+        <img class="thumb photo-open" src="${thumb}" alt="Photo ${n}"
+             data-full="${full}" data-label="Photo ${n} — ${escapeHtml(position(f))}"
+             title="Tap to see this photo full size"
              onerror="this.onerror=null;this.src='${full}'"
-             style="object-fit:cover;width:56px;height:56px;border-radius:8px;flex:0 0 auto">
+             style="object-fit:cover;width:56px;height:56px;border-radius:8px;flex:0 0 auto;cursor:zoom-in">
         <div class="meta">
           <div class="t">Photo ${n}${off ? " — not used" : ""}</div>
           <div class="s">${escapeHtml(position(f))}</div>
@@ -82,9 +119,10 @@ const ScreenRestitch = (() => {
           <div class="card">
             <div class="muted" id="countLine"></div>
             <div class="muted" style="margin-top:6px;font-size:.85rem">
-              Photos are listed in the order you shot them. Remove one that is
-              blurred, or of somewhere else, and build again — nothing is
-              deleted, so you can put it back and try the other way round.
+              Photos are listed in the order you shot them. Tap one to see it
+              full size. Remove one that is blurred, or of somewhere else, and
+              build again — nothing is deleted, so you can put it back and try
+              the other way round.
             </div>
           </div>
           <div id="rows"></div>
@@ -105,8 +143,9 @@ const ScreenRestitch = (() => {
     function draw() {
       const used = frames.filter((f) => !f.excluded).length;
       countLine.textContent =
-        `${escapeHtml(capture.title)} — ${used} of ${frames.length} photos will be used`;
-      rows.innerHTML = frames.map((f, i) => rowHtml(f, i + 1)).join("");
+        `${capture.title} — ${used} of ${frames.length} photos will be used`;
+      const ver = OrbitAPI.cacheStamp(capture);
+      rows.innerHTML = frames.map((f, i) => rowHtml(f, i + 1, ver)).join("");
       // Every photo left out means nothing to build from, and the server says
       // so too - but saying it here keeps the button honest rather than
       // offering a click that can only fail.
@@ -114,6 +153,13 @@ const ScreenRestitch = (() => {
       if (used === 0) {
         goNote.textContent = "Put at least one photo back to build.";
       }
+
+      rows.querySelectorAll(".photo-open").forEach((img) => {
+        img.addEventListener("click", () => {
+          openLightbox(img.dataset.full, img.dataset.label);
+        });
+      });
+
       rows.querySelectorAll(".row-toggle").forEach((btn) => {
         btn.addEventListener("click", async () => {
           const idx = Number(btn.closest(".capture-row").dataset.idx);
@@ -150,7 +196,9 @@ const ScreenRestitch = (() => {
       }
     });
 
-    return () => {};
+    // Leaving the screen with a photo open must not leave the overlay - or its
+    // key listener - behind on whatever comes next.
+    return () => closeLightbox();
   }
 
   return { mount };

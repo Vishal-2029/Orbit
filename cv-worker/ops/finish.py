@@ -717,6 +717,70 @@ def place_on_sphere(img, coverage, px_per_deg, equator_y, fabricate=True):
     return out, mask, target_h / 2.0
 
 
+# Median brightness, out of 255, a finished 360 should reach before we leave it
+# alone. Rooms lit by one window come off a phone at around 40; the captures
+# that look right sit between 110 and 150.
+AUTO_EXPOSURE_TARGET = 105
+
+# The most we are willing to lift, as a gamma. A photograph of a genuinely dark
+# room should still look like one - past this the shadows turn to grey mush and
+# the sensor noise in them comes up with the picture.
+AUTO_EXPOSURE_MAX_GAMMA = 2.0
+
+
+def auto_brighten(img, mask=None, target=AUTO_EXPOSURE_TARGET,
+                  max_gamma=AUTO_EXPOSURE_MAX_GAMMA):
+    """Lift an underexposed panorama; leave a well-exposed one untouched.
+
+    This belongs HERE, on the finished sphere, and not on the photos going in.
+    Brightening each photo separately is what normalize_color's CLAHE does for
+    the display copies, and it is per-photo and scene-dependent: the same wall
+    picks up a different gradient in each shot, which is precisely what feature
+    matching has to agree on. One curve over one finished image cannot do that -
+    there is nothing left to match - so the exposure fix and the stitch stop
+    fighting each other.
+
+    Measured over PHOTOGRAPHED pixels only. A finished sphere carries black
+    polar caps and holes where the camera never pointed, and counting those
+    drags the median down and blows out the real picture to compensate.
+
+    The curve is a gamma, so 0 stays 0: black that was never photographed stays
+    black rather than washing to grey, and nothing clips at the top.
+
+    Returns (image, exponent). An exponent of 1.0 means nothing was changed.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if mask is not None and getattr(mask, "shape", None) is not None \
+            and mask.shape[:2] == gray.shape[:2]:
+        vals = gray[mask > 0]
+    else:
+        # No mask to go on: anything not near-black is taken as photographed.
+        vals = gray[gray > 8]
+
+    # Too little to judge by - a sliver of a capture, or an all-black frame.
+    if vals.size < 1000:
+        return img, 1.0
+
+    median = float(np.median(vals))
+    if median <= 0 or median >= target:
+        return img, 1.0
+
+    # out = 255 * (in/255) ** e, solved so the median lands on the target.
+    # e < 1 brightens; the cap is a floor on e.
+    exponent = float(np.log(target / 255.0) / np.log(median / 255.0))
+    exponent = max(exponent, 1.0 / max_gamma)
+    if exponent >= 0.99:
+        return img, 1.0
+
+    lut = np.clip(((np.arange(256) / 255.0) ** exponent) * 255.0,
+                  0, 255).astype(np.uint8)
+    out = cv2.LUT(img, lut)
+    log.info("[orbit-worker] lifted a dark panorama: median %.0f -> %.0f "
+             "(gamma %.2f, measured over the photographed part)",
+             median, 255.0 * (median / 255.0) ** exponent, 1.0 / exponent)
+    return out, exponent
+
+
 def finish_panorama(pano, circumference_px=None, equator_y=None,
                     wrap=True, equirect=True, max_width=4096,
                     coverage=None, spherical=False):
@@ -850,6 +914,10 @@ def finish_panorama(pano, circumference_px=None, equator_y=None,
         # the debug output as well as on screen.
         if spherical and sphere_fraction >= MIN_SPHERE_COVERAGE:
             out = fill_remaining_black(out)
+
+    # Last, on the finished picture: everything above changes which pixels are
+    # in it, and the exposure is judged from the pixels that survive.
+    out, _ = auto_brighten(out, coverage if have_mask else None)
 
     return out, PanoramaInfo(span_deg=span, px_per_deg=px_per_deg,
                              full_turn=full_turn, pitch_min_deg=pitch_min,

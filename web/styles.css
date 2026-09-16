@@ -204,6 +204,36 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 }
 .row-toggle:disabled { opacity: .45; cursor: default; }
 
+/* Full-size photo, for deciding whether one is blurred or of the wrong room -
+   which a 56px square cannot answer. */
+.lightbox {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,.92);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+  cursor: zoom-out;
+}
+.lightbox img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.lightbox-label {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+  text-align: center;
+  color: #c7ced9; font-size: .85rem;
+  background: linear-gradient(transparent, rgba(0,0,0,.75));
+  pointer-events: none;
+}
+.lightbox-close {
+  position: absolute; top: calc(10px + env(safe-area-inset-top, 0px)); right: 12px;
+  width: 40px; height: 40px;
+  border: 0; border-radius: 50%;
+  background: rgba(255,255,255,.12); color: #e7ecf3;
+  font-size: 24px; line-height: 1; cursor: pointer;
+}
+
 /* Touch targets need to be bigger than the visual circle on a phone. */
 @media (pointer: coarse) {
   .row-delete,
