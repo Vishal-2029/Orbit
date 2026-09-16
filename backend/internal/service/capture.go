@@ -278,20 +278,35 @@ func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Captur
 		return nil, fmt.Errorf("no photos to build from yet — take at least one")
 	}
 
+	// Photos held back on the restitch screen are not queued, and must not
+	// count towards the frame total either: the worker waits for
+	// done + failed to reach it, and a photo that was never queued would
+	// never arrive, so counting it would hang every rebuild until the
+	// finalize timeout.
+	included := make([]domain.Frame, 0, len(frames))
+	for _, f := range frames {
+		if !f.Excluded {
+			included = append(included, f)
+		}
+	}
+	if len(included) == 0 {
+		return nil, fmt.Errorf("every photo is excluded — include at least one to build from")
+	}
+
 	// Building again over an earlier attempt has to start from a clean slate,
 	// or the old manifest keeps being served and progress reads as already
 	// finished. Harmless on a first run: there is nothing to clear.
 	if err := s.repo.ResetForReprocess(ctx, captureID); err != nil {
 		return nil, err
 	}
-	if err := s.repo.SetFrameCount(ctx, captureID, len(frames)); err != nil {
+	if err := s.repo.SetFrameCount(ctx, captureID, len(included)); err != nil {
 		return nil, err
 	}
 	if err := s.repo.SetCaptureStatus(ctx, captureID, domain.StatusQueued, nil); err != nil {
 		return nil, err
 	}
 
-	for _, f := range frames {
+	for _, f := range included {
 		p, err := json.Marshal(framePayload{
 			FrameID: f.ID, Index: f.Index, Yaw: f.Yaw, Pitch: f.Pitch,
 			OriginalKey: f.OriginalKey, Settings: c.Settings, Mode: c.Mode,
@@ -313,9 +328,14 @@ func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Captur
 
 	s.hub.Publish(ctx, realtime.Event{
 		Type: "status", CaptureID: captureID, Status: domain.StatusQueued,
-		Total: len(frames), Progress: 0,
+		Total: len(included), Progress: 0,
 	})
 	return s.repo.GetCapture(ctx, captureID)
+}
+
+// SetFrameExcluded holds one photo back from the next build, or puts it back.
+func (s *Capture) SetFrameExcluded(ctx context.Context, captureID string, idx int, excluded bool) error {
+	return s.repo.SetFrameExcluded(ctx, captureID, idx, excluded)
 }
 
 func (s *Capture) Update(ctx context.Context, id, title string, isPublic bool) error {

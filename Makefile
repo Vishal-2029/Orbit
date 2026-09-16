@@ -20,9 +20,13 @@ reset: ## Stop the infra AND delete all stored photos and captures
 	docker compose down -v
 
 migrate: ## Apply database migrations
-	@docker exec -i orbit-postgres psql -U orbit -d orbit -q < backend/migrations/001_init.sql
-	@docker exec -i orbit-postgres psql -U orbit -d orbit -q < backend/migrations/002_quaternion.sql
-	@docker exec -i orbit-postgres psql -U orbit -d orbit -q < backend/migrations/003_hotspots.sql
+	@# Every migration, in order. Naming them one by one meant each new one had
+	@# to be remembered in three places; dev.sh and docker-compose.yml already
+	@# loop, and this was the last copy still listing them by hand.
+	@for m in backend/migrations/*.sql; do \
+	  echo "applying $$m"; \
+	  docker exec -i orbit-postgres psql -U orbit -d orbit -q < "$$m" || exit 1; \
+	done
 
 api: ## Run the Go API on :8080
 	cd backend && go run ./cmd/api

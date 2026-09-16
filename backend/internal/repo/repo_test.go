@@ -315,3 +315,66 @@ func TestFindStuckCaptures(t *testing.T) {
 		t.Error("an unfinished draft must not be reaped")
 	}
 }
+
+// Excluding a photo is an instruction for the NEXT build, so the thing most
+// worth pinning down is that starting one does not wipe it: ResetForReprocess
+// clears what the LAST run produced, and these two live in the same table.
+func TestFrameExcludedSurvivesReprocess(t *testing.T) {
+	r := liveRepo(t)
+	ctx := context.Background()
+	c := newTestCapture(t, r)
+
+	keys := []string{"captures/x/original/000.jpg", "captures/x/original/001.jpg"}
+	for i, k := range keys {
+		if _, err := r.UpsertFrame(ctx, &domain.Frame{
+			CaptureID: c.ID, Index: i, SlotID: "s",
+			OriginalKey: k, Status: domain.FramePending,
+		}); err != nil {
+			t.Fatalf("UpsertFrame %d: %v", i, err)
+		}
+	}
+
+	frames, err := r.ListFrames(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("ListFrames: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 frames, got %d", len(frames))
+	}
+	if frames[0].Excluded || frames[1].Excluded {
+		t.Fatalf("a new photo must start included: %+v", frames)
+	}
+
+	if err := r.SetFrameExcluded(ctx, c.ID, 0, true); err != nil {
+		t.Fatalf("SetFrameExcluded: %v", err)
+	}
+	frames, _ = r.ListFrames(ctx, c.ID)
+	if !frames[0].Excluded {
+		t.Fatalf("photo 0 should be excluded")
+	}
+	if frames[1].Excluded {
+		t.Fatalf("excluding photo 0 must not touch photo 1")
+	}
+
+	if err := r.ResetForReprocess(ctx, c.ID); err != nil {
+		t.Fatalf("ResetForReprocess: %v", err)
+	}
+	frames, _ = r.ListFrames(ctx, c.ID)
+	if !frames[0].Excluded {
+		t.Fatalf("ResetForReprocess cleared the exclusion; a rebuild would " +
+			"silently put back the photo the user removed")
+	}
+
+	// It has to be reversible, or it is just a slower delete.
+	if err := r.SetFrameExcluded(ctx, c.ID, 0, false); err != nil {
+		t.Fatalf("SetFrameExcluded back: %v", err)
+	}
+	frames, _ = r.ListFrames(ctx, c.ID)
+	if frames[0].Excluded {
+		t.Fatalf("photo 0 should be included again")
+	}
+
+	if err := r.SetFrameExcluded(ctx, c.ID, 99, true); err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound for a photo that is not there, got %v", err)
+	}
+}

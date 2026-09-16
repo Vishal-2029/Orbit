@@ -119,6 +119,11 @@ type Frame struct {
 	Height            int     `json:"height"`
 	Status            string  `json:"status"`
 	Error             *string `json:"error,omitempty"`
+	// Excluded holds this photo back from the next build without deleting it.
+	// Which photo is spoiling a stitch is a guess until you try it, so this is
+	// made to be taken back: the row and its files stay put, and a rebuild
+	// simply does not queue it.
+	Excluded bool `json:"excluded"`
 }
 
 

@@ -61,6 +61,7 @@ func NewServer(svc *service.Capture, hub *realtime.Hub, store storage.Store, cfg
 	v1.Post("/captures/:id/photos", s.uploadPhoto)
 	v1.Post("/captures/:id/process", s.process)
 	v1.Get("/captures/:id/frames", s.listFrames)
+	v1.Patch("/captures/:id/frames/:idx", s.patchFrame)
 	v1.Get("/captures/:id/manifest", s.getManifest)
 	v1.Get("/captures/:id/image/panorama", s.servePanorama)
 	v1.Get("/captures/:id/tiles/:z/:f/:y/:x.jpg", s.serveTile)
@@ -279,6 +280,38 @@ func (s *Server) process(c *fiber.Ctx) error {
 }
 
 func (s *Server) listFrames(c *fiber.Ctx) error {
+	frames, err := s.svc.Frames(c.Context(), c.Params("id"))
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"frames": frames})
+}
+
+// patchFrame changes one photo's part in the next build.
+//
+// Only "excluded" can be set. The photo, where it was pointing and the files
+// behind it are what the capture actually recorded; a review screen may decide
+// whether to USE one, not rewrite what it was.
+//
+// The whole frame list comes back, so the caller redraws from what the server
+// now holds rather than from what it assumed its click did.
+func (s *Server) patchFrame(c *fiber.Ctx) error {
+	idx, err := strconv.Atoi(c.Params("idx"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "bad frame index")
+	}
+	var body struct {
+		Excluded *bool `json:"excluded"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "body must be JSON")
+	}
+	if body.Excluded == nil {
+		return fiber.NewError(fiber.StatusBadRequest, `"excluded" is required (true or false)`)
+	}
+	if err := s.svc.SetFrameExcluded(c.Context(), c.Params("id"), idx, *body.Excluded); err != nil {
+		return err
+	}
 	frames, err := s.svc.Frames(c.Context(), c.Params("id"))
 	if err != nil {
 		return err

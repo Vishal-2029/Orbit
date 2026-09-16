@@ -1,0 +1,16 @@
+-- Let a photo be held back from stitching without being thrown away.
+--
+-- A capture that stitched badly is usually one or two bad photos away from
+-- stitching well: a shot of a blank ceiling, one taken while walking, one of a
+-- different room entirely. Until now the only way to act on that was to delete
+-- the capture and shoot it again.
+--
+-- Excluding is deliberately NOT deleting. Which photo is hurting a stitch is a
+-- guess until you try it, so the useful operation is one you can take back:
+-- exclude, rebuild, look, and put it back if the result got worse. The photo
+-- and its files stay exactly where they are.
+--
+-- It survives a rebuild on purpose: ResetForReprocess clears what the LAST run
+-- produced (status, manifest, processed keys), and this is an instruction for
+-- the NEXT one, so it is left alone there.
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS excluded boolean NOT NULL DEFAULT false;
