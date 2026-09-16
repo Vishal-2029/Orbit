@@ -8,7 +8,12 @@ LOGS="$ROOT/.logs"; mkdir -p "$LOGS"
 say() { printf "\033[36m==>\033[0m %s\n" "$*"; }
 
 say "Starting infra (Postgres, MinIO, Redis)..."
-docker compose up -d >/dev/null
+# Name the three infra services explicitly. A bare `docker compose up -d`
+# brings up the whole file, which also builds and runs containerised copies of
+# the API and the worker — the very processes this script is about to start
+# from source — and waits on the one-shot `migrate` service, whose failure
+# then aborted the script before anything else ran.
+docker compose up -d postgres minio redis >/dev/null
 until docker exec orbit-postgres pg_isready -U orbit >/dev/null 2>&1; do sleep 1; done
 # Every migration, in order. Listing them one by one meant each new one had
 # to be remembered here, and 002 was already missing.

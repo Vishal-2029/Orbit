@@ -24,10 +24,24 @@ services:
     volumes:
       - ./backend/migrations:/migrations:ro
     entrypoint: ["sh", "-c"]
-    command: >-
-      psql -h postgres -U orbit -d orbit -f /migrations/001_init.sql &&
-      psql -h postgres -U orbit -d orbit -f /migrations/002_quaternion.sql &&
-      psql -h postgres -U orbit -d orbit -f /migrations/003_hotspots.sql
+    # The script has to be ONE argument. A plain string here is word-split by
+    # compose, so `sh -c` took "psql" as the whole script and every flag after
+    # it — including -h postgres — became a positional parameter it ignored.
+    # That is why this container failed every start with "connection to server
+    # on socket ... failed": it was running a bare `psql`, against no host.
+    #
+    # Applying every migration in order, rather than naming them one by one,
+    # is the same lesson scripts/dev.sh already learned.
+    command:
+      - |
+        set -e
+        # $$m, not $m: compose expands $VAR in this file before the shell ever
+        # sees it, and $m is not set here — it would substitute an empty string
+        # and psql would be handed no file at all.
+        for m in /migrations/*.sql; do
+          echo "applying $$m"
+          psql -h postgres -U orbit -d orbit -v ON_ERROR_STOP=1 -f "$$m"
+        done
 
   minio:
     image: minio/minio:latest
