@@ -694,8 +694,41 @@ def handle_finalize_job(mc, job, attempt=1):
     loaded = []
     for f in ring:
         try:
-            raw = get_object_bytes(mc, settings.bucket_public, processed_key(capture_id, f["index"]))
-            img = decode_bytes_to_bgr(raw)
+            # Stitch from the ORIGINAL upload, not the processed frame.
+            #
+            # The processed frame is built for DISPLAY: normalize_color runs
+            # CLAHE over it, which equalises local contrast tile by tile. That
+            # is per-photo and scene-dependent, so the same wall picks up a
+            # different gradient in each shot - and a gradient that disagrees
+            # between two photos is precisely what feature matching has to
+            # agree on. Feeding it to the stitcher cost real photos: on a
+            # 12-photo set, the raw uploads put 6 into the overlapping group,
+            # CLAHE alone dropped it to 5, and CLAHE plus the resize and the
+            # second JPEG round-trip dropped it to 4.
+            #
+            # The originals are already kept in the private bucket, so this
+            # costs no extra storage. Exposure differences between shots are
+            # handled after the warp by _compensate_exposure, which measures
+            # them across the actual overlaps - the right place for it, and
+            # unlike CLAHE it cannot invent disagreeing gradients.
+            raw, img = None, None
+            original = f.get("original_key")
+            if original:
+                try:
+                    raw = get_object_bytes(mc, settings.bucket_private, original)
+                    # EXIF rotation is baked into the processed frame but not
+                    # into the original, so it has to be applied here or a
+                    # portrait photo arrives on its side.
+                    img = decode_with_exif_rotation(raw)
+                except Exception as e:
+                    log.debug("%s capture=%s: original for frame %s unavailable "
+                              "(%s); using the processed copy",
+                              PREFIX, capture_id, f.get("index"), e)
+                    raw, img = None, None
+            if img is None:
+                raw = get_object_bytes(mc, settings.bucket_public,
+                                       processed_key(capture_id, f["index"]))
+                img = decode_bytes_to_bgr(raw)
             if img is not None and img.shape[1] > load_width:
                 img = resize_to_width(img, load_width)
             # The encoded bytes are the other copy of this photo in memory, and
