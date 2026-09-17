@@ -23,8 +23,8 @@ import numpy as np
 from config import settings
 from ops.rotation_refine import refine_poses
 from ops.ray_solve import RaySolver
-from ops.equirect_render import (blend_wrapped, footprint, render_frame,
-                                 solve_gains)
+from ops.equirect_render import (_paste_wrapped, blend_wrapped, footprint,
+                                 render_frame, solve_gains)
 
 log = logging.getLogger("orbit-worker")
 
@@ -443,6 +443,60 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         return False, None, "Something went wrong placing the photos onto the sphere.", None
 
 
+# Most photos a capture may have and still get graph-cut seams. See the
+# blend_wrapped call in _stitch_equirect for the timings behind it.
+GRAPH_CUT_MAX_PHOTOS = 12
+
+# A photo aimed this far below the horizon counts as the straight-down shot.
+NADIR_PHOTO_DEG = 70.0
+
+# How far the other photos' coverage is shrunk before the straight-down shot is
+# cut out of it, so that where it does fill a hole it still overlaps the rim
+# and blends in rather than meeting it at a hard edge.
+NADIR_RIM_PX = 12
+
+
+def _nadir_fills_holes_only(tiles, masks, corners, photos, width, height):
+    """Let the straight-down photo fill only what nothing else saw.
+
+    Pointing a phone straight down photographs the person holding it: a real
+    32-photo sphere's down shot was mostly jeans and sandals. The ring tilted
+    45 degrees down had already covered that floor, cleanly, all the way to
+    the nadir - but the seam finder judges photos by how well they agree, not
+    by what they show, and on one build it kept the feet.
+
+    So the down shot is cut out of everywhere another photo reaches, and keeps
+    only genuine holes. Masks are edited in place; nothing is removed from the
+    lists, so they stay aligned with `photos`.
+    """
+    nadir = {k for k, (_, _, pitch) in enumerate(photos)
+             if math.degrees(pitch) > NADIR_PHOTO_DEG}
+    if not nadir or len(nadir) == len(masks):
+        return
+    others = np.zeros((height, width), dtype=np.uint8)
+    for k, (mask, (cx, cy)) in enumerate(zip(masks, corners)):
+        if k not in nadir:
+            _paste_wrapped(others, mask, cx, cy,
+                           lambda region, src: np.maximum(region, src, out=region))
+    size = 2 * NADIR_RIM_PX + 1
+    others = cv2.erode(others, np.ones((size, size), np.uint8))
+    kept = []
+    for k in nadir:
+        mask = masks[k]
+        cx, cy = corners[k]
+        th, tw = mask.shape
+        rows = slice(max(0, cy), min(height, cy + th))
+        cols = (cx + np.arange(tw)) % width
+        seen = np.zeros_like(mask)
+        seen[rows.start - cy:rows.stop - cy] = others[rows][:, cols]
+        before = int((mask > 0).sum())
+        mask[seen > 0] = 0
+        kept.append((before, int((mask > 0).sum())))
+    log.info("[orbit-worker] straight-down photo kept only where nothing else "
+             "reached: %s", ", ".join("%.0f%%" % (100.0 * a / b if b else 0)
+                                      for b, a in kept))
+
+
 def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
     """Render the posed photos onto a wrapping equirectangular canvas.
 
@@ -498,6 +552,8 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
     if not tiles:
         return False, None, "None of the photos landed on the sphere.", None
 
+    _nadir_fills_holes_only(tiles, masks, corners, placed_photos, width, height)
+
     try:
         gains = solve_gains(tiles, masks, corners, width, height)
         for t, g in zip(tiles, gains):
@@ -506,8 +562,13 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
     except Exception as e:
         log.debug("[orbit-worker] exposure gains skipped: %s", e)
 
+    # Graph cut routes a seam around a near object instead of through it, but
+    # its cost grows steeply with the number of overlaps: 9 photos stitched in
+    # 25 s end to end, while 32 photos spent 495 s in the seam finder alone,
+    # against 19 s with DP. Above the limit, DP.
+    seams = _graph_cut_seams if len(tiles) <= GRAPH_CUT_MAX_PHOTOS else _find_seams
     pano, cover = blend_wrapped(tiles, masks, corners, width, height,
-                                find_seams=_graph_cut_seams)
+                                find_seams=seams)
     geom = SphereGeometry(circumference_px=float(width), equator_y=height / 2.0,
                           coverage=cover, hfov_deg=hfov_deg, wrapped=True,
                           photos=placed_photos)
