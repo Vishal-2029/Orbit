@@ -507,7 +507,7 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
         log.debug("[orbit-worker] exposure gains skipped: %s", e)
 
     pano, cover = blend_wrapped(tiles, masks, corners, width, height,
-                                find_seams=_find_seams)
+                                find_seams=_graph_cut_seams)
     geom = SphereGeometry(circumference_px=float(width), equator_y=height / 2.0,
                           coverage=cover, hfov_deg=hfov_deg, wrapped=True,
                           photos=placed_photos)
@@ -552,7 +552,7 @@ def _compensate_exposure(warped, masks, corners):
 SEAM_WORK_MEGAPIX = settings.seam_work_megapix
 
 
-def _find_seams(warped, masks, corners):
+def _find_seams(warped, masks, corners, graph_cut=False):
     """Choose where each pair of overlapping photos should hand over.
 
     Without this, every overlap is a wide cross-fade of two photos. Anything
@@ -578,8 +578,25 @@ def _find_seams(warped, masks, corners):
                 cv2.resize(mk, (sw, sh), interpolation=cv2.INTER_NEAREST)))
             small_corners.append((int(c[0] * scale), int(c[1] * scale)))
 
-        cv2.detail_DpSeamFinder("COLOR_GRAD").find(
-            small_imgs, small_corners, small_masks)
+        found = False
+        # Graph cut only where the caller asks. It costs a few seconds on the
+        # equirect pose path (37 s against 35 s, 32 s against 19 s on the
+        # sphere tests), but on the feature-matching path's warped canvases it
+        # ran past eight minutes where DP took eleven seconds.
+        if graph_cut and settings.seam_finder != "dp":
+            # Graph cut edits the masks in place, so it gets copies: if it
+            # throws halfway, the DP finder must start from untouched masks.
+            try:
+                trial = [cv2.UMat(m.get()) for m in small_masks]
+                cv2.detail_GraphCutSeamFinder("COST_COLOR_GRAD").find(
+                    small_imgs, small_corners, trial)
+                small_masks = trial
+                found = True
+            except Exception as e:
+                log.info("[orbit-worker] graph-cut seams failed (%s); using DP", e)
+        if not found:
+            cv2.detail_DpSeamFinder("COLOR_GRAD").find(
+                small_imgs, small_corners, small_masks)
 
         # Scale each seam mask back up and intersect with the real coverage, so
         # the seam can only ever remove pixels, never invent them.
@@ -602,6 +619,11 @@ def _find_seams(warped, masks, corners):
     except Exception as e:
         log.debug("[orbit-worker] seam finding skipped: %s", e)
         return False
+
+
+def _graph_cut_seams(warped, masks, corners):
+    """_find_seams with graph cut, for the equirect pose path."""
+    return _find_seams(warped, masks, corners, graph_cut=True)
 
 
 def _blend(warped, masks, corners):

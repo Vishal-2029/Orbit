@@ -166,6 +166,18 @@ class Settings:
     seam_work_megapix = float(_env("SEAM_WORK_MEGAPIX", "0")) or (
         0.2 if _auto_compositing_mp() else 0.4)
 
+    # Which seam finder picks the cut between two overlapping photos.
+    #
+    # "graphcut" (the default) minimises colour AND gradient difference over the
+    # whole overlap at once, so a cut can travel along an object's edge instead
+    # of straight through its face. That is what parallax needs: a handheld
+    # capture moves the phone, a pillar a metre away cannot line up while the
+    # stairs behind it do, and the dynamic-programming finder cut through the
+    # pillar - a notch and a doubled edge. Slower (18 s against 11 s on a 9-photo
+    # ring), and it falls back to "dp" by itself if it fails. Used on the pose
+    # path only: on feature-matched canvases it is minutes, not seconds.
+    seam_finder = _env("SEAM_FINDER", "graphcut").lower()
+
     # Pixels around the sphere's equator. Smaller means smaller tiles from the
     # very first warp, which is the only saving that arrives early enough.
     pose_circumference_px = int(_env("POSE_CIRCUMFERENCE_PX", "0")) or (

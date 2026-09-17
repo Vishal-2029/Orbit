@@ -98,7 +98,12 @@ class RaySolver:
         self.h = max(1, int(round(h * self.scale)))
         self.pairs = {}
 
-        sift = cv2.SIFT_create(nfeatures=5000)
+        # A lower contrast threshold than SIFT's 0.04. Dark granite stairs and a
+        # shaded floor hold plenty of texture, but faint: at the default, a real
+        # join between two stairwell photos kept 7 rotation-consistent matches -
+        # too few to use, so the join was left to the drifting compass. At 0.02
+        # it kept 21, for well under a second more.
+        sift = cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.02)
         feats = []
         for img in images:
             small = cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_AREA) \
