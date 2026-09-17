@@ -44,17 +44,38 @@ INLIER_PX = 4.0
 # Fewer agreeing rays than this and the pair says nothing trustworthy.
 MIN_INLIERS = 8
 
-# A pair rotation this far from what the sensor predicted is a false match -
-# repeated tiles, a railing matched one bay along - not a compass error.
-MAX_PAIR_DISAGREEMENT_DEG = 20.0
+# The sensor is trusted very differently about the two halves of a rotation.
+#
+# TILT - pitch and roll - comes from gravity, which the phone always knows.
+# On a real 32-photo sphere the photos agreed with the sensor's tilt to within
+# a degree or two on nearly every pair.
+#
+# HEADING - yaw - has no fixed reference in gyro mode, and it jumps. The same
+# capture had shots recorded 15-30 degrees from where the photos put them: one
+# logged at 317 degrees sat at 300, right on its dot. A single limit for both
+# halves treated those real heading corrections as a broken solve and threw the
+# whole thing away, leaving a 32-photo sphere placed on the bad headings.
+#
+# So a pair is judged on tilt alone, and heading is left to the photos.
+MAX_PAIR_TILT_DISAGREEMENT_DEG = 8.0
+MAX_PAIR_YAW_DISAGREEMENT_DEG = 60.0
 
-# How firmly each camera is held to its sensor rotation, against the pairs.
-# Weak enough that a matched pair corrects real drift; strong enough that a
-# camera no pair constrains stays where the sensor put it instead of wandering.
-SENSOR_PRIOR = 1.0
+# How firmly each camera is held to its sensor rotation, per axis of a
+# world-frame correction. Tilt is held hard; heading only lightly - enough to
+# pin down a camera no pair reaches, and the capture's overall facing.
+TILT_PRIOR = 3.0
+YAW_PRIOR = 0.02
 
-# Any single correction beyond this means the solve has come apart.
-MAX_CORRECTION_DEG = 25.0
+# A single correction beyond these means the solve has come apart.
+MAX_TILT_CORRECTION_DEG = 10.0
+MAX_YAW_CORRECTION_DEG = 60.0
+
+# Residual, in degrees, beyond which a pair is progressively down-weighted, so
+# one false match cannot drag its cameras across the sphere.
+ROBUST_SCALE_DEG = 3.0
+
+# World up in the warper's frame (+Y is down). Only the axis matters here.
+_VERTICAL = np.array([0.0, 1.0, 0.0])
 
 FOV_RANGE_DEG = (50, 90)
 
@@ -212,49 +233,86 @@ class RaySolver:
             R, inl = self._pair_rotation(pa, pb, K)
             if R is None:
                 continue
-            if _angle(R, self.sensor[b].T @ self.sensor[a]) > MAX_PAIR_DISAGREEMENT_DEG:
+            tilt, yaw = _tilt_yaw_disagreement(R, self.sensor[a], self.sensor[b])
+            if tilt > MAX_PAIR_TILT_DISAGREEMENT_DEG or yaw > MAX_PAIR_YAW_DISAGREEMENT_DEG:
                 continue
             rel[(a, b)] = (R, int(inl.sum()))
         if len(rel) < max(2, self.n // 3):
             return None
 
-        # Gauss-Newton on R_i = S_i exp(w_i), residual log(Rab^T R_b^T R_a).
-        # Right-perturbing R_a adds w_a to the residual; R_b enters through
-        # exp(-Rab^T w_b) on the left, which becomes -E^T Rab^T w_b on the right.
+        # Gauss-Newton on world-frame corrections: R_i = exp(c_i) S_i, where the
+        # prior on c_i is strong about the horizontal axes (tilt) and weak about
+        # the vertical (heading). Pair residual e = log(Rab^T R_b^T R_a);
+        # left-perturbing R_a by d gives e + R_a^T d, and R_b by d gives
+        # e - R_a^T d. Robustly reweighted, so a false match loses its pull.
         n = self.n
-        W = np.zeros((n, 3))
+        R = [S.copy() for S in self.sensor]
+        prior_w = np.diag([TILT_PRIOR, YAW_PRIOR, TILT_PRIOR])
+        robust = math.radians(ROBUST_SCALE_DEG)
 
-        def rot(i):
-            return self.sensor[i] @ cv2.Rodrigues(W[i])[0]
-
-        for _ in range(40):
+        for _ in range(60):
             rows, rhs = [], []
             for (a, b), (Rab, count) in rel.items():
-                E = Rab.T @ rot(b).T @ rot(a)
-                e = cv2.Rodrigues(E)[0].ravel()
-                weight = math.sqrt(count)
+                e = cv2.Rodrigues(Rab.T @ R[b].T @ R[a])[0].ravel()
+                weight = math.sqrt(count) / (1.0 + (np.linalg.norm(e) / robust) ** 2)
                 J = np.zeros((3, 3 * n))
-                J[:, 3 * a:3 * a + 3] = np.eye(3)
-                J[:, 3 * b:3 * b + 3] = -E.T @ Rab.T
+                J[:, 3 * a:3 * a + 3] = R[a].T
+                J[:, 3 * b:3 * b + 3] = -R[a].T
                 rows.append(J * weight)
                 rhs.append(-e * weight)
-            prior = np.eye(3 * n) * SENSOR_PRIOR
-            rows.append(prior)
-            rhs.append(-W.ravel() * SENSOR_PRIOR)
+            for i in range(n):
+                c = cv2.Rodrigues(R[i] @ self.sensor[i].T)[0].ravel()
+                J = np.zeros((3, 3 * n))
+                J[:, 3 * i:3 * i + 3] = prior_w
+                rows.append(J)
+                rhs.append(-(prior_w @ c))
             step = np.linalg.lstsq(np.vstack(rows), np.concatenate(rhs), rcond=None)[0]
-            W += step.reshape(n, 3)
+            for i in range(n):
+                R[i] = cv2.Rodrigues(step[3 * i:3 * i + 3])[0] @ R[i]
             if np.abs(step).max() < 1e-7:
                 break
 
-        solved = [rot(i).astype(np.float32) for i in range(n)]
-        moved = [_angle(self.sensor[i], solved[i]) for i in range(n)]
-        if max(moved) > MAX_CORRECTION_DEG:
-            log.info("[orbit-worker] ray solve came apart (a camera moved %.0f deg); "
-                     "not used", max(moved))
+        solved = [r.astype(np.float32) for r in R]
+        tilts, yaws = [], []
+        for i in range(n):
+            t, y = _correction_tilt_yaw(R[i] @ self.sensor[i].T)
+            tilts.append(t)
+            yaws.append(y)
+        if max(tilts) > MAX_TILT_CORRECTION_DEG or max(yaws) > MAX_YAW_CORRECTION_DEG:
+            log.info("[orbit-worker] ray solve came apart (a camera tilted %.0f deg, "
+                     "turned %.0f deg); not used", max(tilts), max(yaws))
             return None
+        moved = [_angle(self.sensor[i], solved[i]) for i in range(n)]
         stats = {"hfov_deg": fov, "fov_score": fov_score, "pairs": len(rel),
                  "pair_keys": set(rel),
                  "pairs_matched": len(self.pairs),
                  "mean_correction_deg": float(np.mean(moved)),
-                 "max_correction_deg": float(max(moved))}
+                 "max_correction_deg": float(max(moved)),
+                 "max_tilt_correction_deg": float(max(tilts)),
+                 "max_yaw_correction_deg": float(max(yaws))}
         return solved, fov, stats
+
+
+def _correction_tilt_yaw(C):
+    """Split a world-frame correction into how far it tips the vertical (tilt)
+    and how far it turns about it (heading), in degrees."""
+    tilt = math.degrees(math.acos(np.clip(C @ _VERTICAL @ _VERTICAL, -1, 1)))
+    # Heading: the turn of the horizontal forward axis about the vertical.
+    f = np.array([0.0, 0.0, 1.0])
+    g = C @ f
+    g[1] = 0.0
+    if np.linalg.norm(g) < 1e-9:
+        return tilt, 0.0
+    g /= np.linalg.norm(g)
+    return tilt, math.degrees(math.acos(np.clip(g @ f, -1, 1)))
+
+
+def _tilt_yaw_disagreement(Rab, Sa, Sb):
+    """How far a photo-derived pair rotation disagrees with the sensor, split
+    into tilt (where it sends 'up') and heading (the rest), in degrees."""
+    up_a, up_b = Sa.T @ _VERTICAL, Sb.T @ _VERTICAL
+    tilt = math.degrees(math.acos(np.clip((Rab @ up_a) @ up_b, -1, 1)))
+    # The world rotation that turns the sensor's b onto the photos' b.
+    C = Sa @ Rab.T @ Sb.T
+    _, yaw = _correction_tilt_yaw(C)
+    return tilt, yaw
