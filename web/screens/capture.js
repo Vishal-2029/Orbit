@@ -216,8 +216,13 @@ const ScreenCapture = (() => {
       // So the scene is sampled while the user is still aiming, and if the
       // brightest thing seen is blowing out, the lock is taken a stop or two
       // down. Cameras that do not offer the control simply skip this.
-      const bias = exposureBiasFor(caps);
-      if (bias !== null) wanted.push({ exposureCompensation: bias });
+      //
+      // No longer done. Indoors a window or a lamp clips in almost every room,
+      // so the bias fired on nearly every capture and locked the whole ring
+      // one to two stops dark - originals came in at a median of 43 out of 255.
+      // A dark interior is the more common failure by far, and the finished
+      // panorama is what people look at, so the camera's own metering is kept.
+      // exposureBiasFor stays for anyone who wants to bring it back per scene.
       if (supports("exposureMode", "manual")) wanted.push({ exposureMode: "manual" });
       if (supports("whiteBalanceMode", "manual")) wanted.push({ whiteBalanceMode: "manual" });
       // Focus too. A refocus between shots changes the framing slightly, which
@@ -959,10 +964,28 @@ const ScreenCapture = (() => {
       return new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
     }
 
-    // Video frames only: takePhoto() reconfigures the camera and can stall the
-    // shutter for most of a second. An instant shutter was chosen over the
-    // slightly cleaner still. stillCapture() is kept should that be revisited.
-    function grabFrame() {
+    // A real photo at the camera's normal resolution, where the browser can
+    // take one; a frame of the live video only as the fallback.
+    //
+    // Video frames were chosen for an instant shutter, but they cap every photo
+    // at the preview size (1920x1080 at best) and carry video processing - the
+    // 360 is the product, and it is only as sharp as the photos going into it.
+    // A still costs a fraction of a second at the shutter; the thumbnail and
+    // the upload already run in the background, so nothing else waits on it.
+    async function grabFrame() {
+      const cap = stillCapture();
+      if (cap) {
+        try {
+          const blob = await cap.takePhoto();
+          if (blob && blob.size > 0) return blob;
+        } catch (e) {
+          // Some Android cameras advertise ImageCapture and then refuse it.
+          // Remember that, so every later shot goes straight to the fallback
+          // instead of paying for the same failure again.
+          console.log("[orbit] takePhoto unavailable, using video frames:", e.message);
+          imageCapture = false;
+        }
+      }
       return grabVideoFrame();
     }
 
