@@ -37,6 +37,8 @@ const ScreenRestitch = (() => {
   // from a 56px square. Tapping one opens the full original - the actual upload,
   // not the downscaled copy the stitcher works from.
   let lightbox = null;
+  let gallery = [];      // [{ src, label }] in shot order
+  let galleryAt = 0;
 
   function closeLightbox() {
     if (!lightbox) return;
@@ -47,22 +49,76 @@ const ScreenRestitch = (() => {
 
   function onLightboxKey(e) {
     if (e.key === "Escape") closeLightbox();
+    else if (e.key === "ArrowRight") showPhoto(galleryAt + 1);
+    else if (e.key === "ArrowLeft") showPhoto(galleryAt - 1);
   }
 
-  function openLightbox(src, label) {
+  // Stops at the ends rather than wrapping: the photos are in shot order, and
+  // jumping from the last straight back to the first would hide that you had
+  // reached the end.
+  function showPhoto(i) {
+    if (!lightbox || i < 0 || i >= gallery.length) return;
+    galleryAt = i;
+    const g = gallery[i];
+    const img = lightbox.querySelector("img");
+    img.src = g.src;
+    img.alt = g.label;
+    lightbox.querySelector(".lightbox-label").textContent =
+      `${g.label}   (${i + 1} / ${gallery.length})`;
+    lightbox.querySelector(".lightbox-prev").disabled = i === 0;
+    lightbox.querySelector(".lightbox-next").disabled = i === gallery.length - 1;
+    // Warm the neighbours, so the next swipe shows a photo rather than a gap.
+    [i - 1, i + 1].forEach((j) => {
+      if (j >= 0 && j < gallery.length) new Image().src = gallery[j].src;
+    });
+  }
+
+  // Opens on one photo and pages through them all - reviewing a capture means
+  // looking at every photo, and closing and reopening for each was the
+  // slowest part of the screen.
+  function openLightbox(photos, start) {
     closeLightbox();
+    gallery = photos;
     lightbox = document.createElement("div");
     lightbox.className = "lightbox";
     lightbox.innerHTML = `
       <button class="lightbox-close" aria-label="Close photo">×</button>
-      <img src="${src}" alt="${escapeHtml(label)}">
-      <div class="lightbox-label">${escapeHtml(label)}</div>`;
-    // Anywhere closes it, the image included: this is a look, not a workspace,
-    // and hunting for a close button on a phone is worse than the odd
-    // accidental dismissal.
-    lightbox.addEventListener("click", closeLightbox);
+      <button class="lightbox-nav lightbox-prev" aria-label="Previous photo">‹</button>
+      <img alt="">
+      <button class="lightbox-nav lightbox-next" aria-label="Next photo">›</button>
+      <div class="lightbox-label"></div>`;
+
+    // Only the backdrop and the close button dismiss it now. With swiping, a
+    // tap on the photo itself is far too often the end of a swipe.
+    lightbox.addEventListener("click", (e) => {
+      if (e.target === lightbox || e.target.closest(".lightbox-close")) closeLightbox();
+    });
+    lightbox.querySelector(".lightbox-prev").addEventListener("click", (e) => {
+      e.stopPropagation(); showPhoto(galleryAt - 1);
+    });
+    lightbox.querySelector(".lightbox-next").addEventListener("click", (e) => {
+      e.stopPropagation(); showPhoto(galleryAt + 1);
+    });
+
+    // Swipe: a mostly-horizontal drag of 40px or more turns the page.
+    let x0 = null, y0 = null;
+    lightbox.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) { x0 = null; return; }
+      x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+    }, { passive: true });
+    lightbox.addEventListener("touchend", (e) => {
+      if (x0 === null) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - x0, dy = t.clientY - y0;
+      x0 = null;
+      if (Math.abs(dx) >= 40 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        showPhoto(galleryAt + (dx < 0 ? 1 : -1));
+      }
+    }, { passive: true });
+
     document.addEventListener("keydown", onLightboxKey);
     document.body.appendChild(lightbox);
+    showPhoto(start);
   }
 
   function rowHtml(f, n, ver) {
@@ -154,9 +210,10 @@ const ScreenRestitch = (() => {
         goNote.textContent = "Put at least one photo back to build.";
       }
 
-      rows.querySelectorAll(".photo-open").forEach((img) => {
+      const openers = Array.from(rows.querySelectorAll(".photo-open"));
+      openers.forEach((img, i) => {
         img.addEventListener("click", () => {
-          openLightbox(img.dataset.full, img.dataset.label);
+          openLightbox(openers.map((o) => ({ src: o.dataset.full, label: o.dataset.label })), i);
         });
       });
 
