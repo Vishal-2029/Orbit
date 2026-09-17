@@ -180,6 +180,12 @@ class Settings:
     # 32-photo sphere, and it is what removes the doubled window frames.
     refine_rotations = _env("REFINE_ROTATIONS", "").lower() not in ("0", "false", "no")
 
+    # A second, more direct solve (ops/ray_solve.py) for captures refinement
+    # cannot get a grip on - a plain floor, a blank wall - which measures the
+    # field of view from the photos and solves rotations from shared rays. Only
+    # used when it lands matched points closer together than refinement did.
+    ray_solve = _env("RAY_SOLVE", "").lower() not in ("0", "false", "no")
+
     # Paint posed photos straight onto a full 360x180 equirectangular canvas
     # (ops/equirect_render.py) instead of OpenCV's spherical warper. The canvas
     # wraps, so the seam between the last and first photo is blended like any

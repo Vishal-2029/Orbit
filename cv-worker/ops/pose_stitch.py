@@ -22,6 +22,7 @@ import numpy as np
 
 from config import settings
 from ops.rotation_refine import refine_poses
+from ops.ray_solve import RaySolver
 from ops.equirect_render import (blend_wrapped, footprint, render_frame,
                                  solve_gains)
 
@@ -252,6 +253,37 @@ def _plan_scale(rotations, w, h, hfov_deg, budget_px):
     return scale
 
 
+def _try_ray_solve(images, sensor_rotations, rotations, shifts, hfov_deg):
+    """Swap in ray-solved rotations and field of view when they fit better.
+
+    Never raises: a failure here keeps what refinement produced.
+    """
+    try:
+        solver = RaySolver(images, sensor_rotations)
+        result = solver.solve(hfov_deg)
+        if result is None:
+            return rotations, shifts, hfov_deg
+        solved, fov, stats = result
+        keys = stats["pair_keys"]
+        before = solver.error(rotations, hfov_deg, shifts, keys)
+        after = solver.error(solved, fov, None, keys)
+        if after < 0.8 * before:
+            log.info("[orbit-worker] ray solve used: field of view %.0f deg (was %.0f), "
+                     "%d of %d pairs, cameras moved %.1f deg on average (worst %.1f); "
+                     "matched points now %.1f px apart, were %.1f",
+                     fov, hfov_deg, stats["pairs"], stats["pairs_matched"],
+                     stats["mean_correction_deg"], stats["max_correction_deg"],
+                     after, before)
+            # Shifts belonged to refinement's solve; the ray solve models the
+            # lens centred, which is what a still photo is.
+            return solved, [(0.0, 0.0)] * len(solved), fov
+        log.info("[orbit-worker] ray solve not used: %.1f px vs %.1f px already",
+                 after, before)
+    except Exception as e:
+        log.warning("[orbit-worker] ray solve skipped (%s: %s)", type(e).__name__, e)
+    return rotations, shifts, hfov_deg
+
+
 def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
     """Project photos onto a sphere using their recorded rotations.
 
@@ -286,9 +318,20 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
         # than the sensor does, so they are asked - with the sensor still
         # setting which way is up and which way is north. The field of view is
         # measured on the way, and replaces the assumed one.
+        sensor_rotations = rotations
         if settings.refine_rotations and len(usable) >= 3:
             rotations, shifts, hfov_deg, _ = refine_poses(
                 [images[i] for i in usable], rotations, hfov_deg)
+
+        # Refinement trusts only confident matches, and on a plain floor or a
+        # blank wall that is almost none - it then keeps the compass and the
+        # assumed lens, which is what put a staircase along the top of a real
+        # capture. The ray solve is kept only when the photos agree with it
+        # better than with what refinement produced.
+        if settings.ray_solve and len(usable) >= 3:
+            rotations, shifts, hfov_deg = _try_ray_solve(
+                [images[i] for i in usable], sensor_rotations,
+                rotations, shifts, hfov_deg)
 
         if settings.equirect_render:
             return _stitch_equirect(images, usable, rotations, shifts, hfov_deg)

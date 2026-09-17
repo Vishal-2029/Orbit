@@ -719,8 +719,10 @@ def place_on_sphere(img, coverage, px_per_deg, equator_y, fabricate=True):
 
 # Median brightness, out of 255, a finished 360 should reach before we leave it
 # alone. Rooms lit by one window come off a phone at around 40; the captures
-# that look right sit between 110 and 150.
-AUTO_EXPOSURE_TARGET = 105
+# that look right sit between 130 and 150. It was 105, which left a real
+# daylit balcony at 117 - shadowed floor, dim stairwell - looking dark and
+# untouched; 130 lifts that gently and still leaves a bright scene alone.
+AUTO_EXPOSURE_TARGET = 130
 
 # The most we are willing to lift, as a gamma. A photograph of a genuinely dark
 # room should still look like one - past this the shadows turn to grey mush and
