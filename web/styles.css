@@ -681,6 +681,21 @@ img, canvas, video { max-width: 100%; }
 /* A toggle that is off should look off, not merely unpressed. */
 .viewer-tool.off { opacity: .45; }
 
+/* A photo's number, pinned where its centre landed on the sphere. Readable over
+   a bright sky and a dark floor alike, and never in the way of a drag. */
+.photo-label {
+  transform: translate(-50%, -50%);
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(10, 12, 18, .78);
+  border: 1px solid rgba(255, 216, 77, .75);
+  color: #ffd84d;
+  font-size: 13px; font-weight: 600; line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* Landscape on a phone is short: a vertical bar would run off the screen. */
 @media (orientation: landscape) and (max-height: 480px) {
   .viewer-tools {

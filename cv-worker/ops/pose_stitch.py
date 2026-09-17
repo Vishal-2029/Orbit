@@ -72,7 +72,8 @@ def quaternion_to_matrix(x, y, z, w):
 
 
 class SphereGeometry(collections.namedtuple(
-        "SphereGeometry", "circumference_px equator_y coverage hfov_deg wrapped")):
+        "SphereGeometry",
+        "circumference_px equator_y coverage hfov_deg wrapped photos")):
     """Where the world sits in a panorama this module built.
 
     circumference_px  pixels for one full turn, i.e. 2*pi*focal
@@ -99,7 +100,12 @@ class SphereGeometry(collections.namedtuple(
     __slots__ = ()
 
 
-SphereGeometry.__new__.__defaults__ = (None, None, False)   # coverage, hfov_deg, wrapped
+# photos: [(image_index, yaw_rad, pitch_rad)] - where each placed photo's centre
+# landed, in the viewer's frame (yaw 0 mid-panorama, growing rightwards; pitch
+# positive downwards). Labels on the finished 360 are drawn from it, so a
+# photo can be named exactly where it sits after refinement and the ray solve,
+# not where the compass said it was.
+SphereGeometry.__new__.__defaults__ = (None, None, False, None)   # coverage, hfov_deg, wrapped, photos
 
 
 def _qmul(a, b):
@@ -468,7 +474,7 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
         width = int(width * 0.75)
 
     k_scale = sw / float(w)
-    tiles, masks, corners = [], [], []
+    tiles, masks, corners, placed_photos = [], [], [], []
     for i, R, (dx, dy) in zip(usable, rotations, shifts):
         img = images[i]
         if img.shape[:2] != (sh, sw):
@@ -479,6 +485,12 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
         if placed is None:
             continue
         tile, mask, corner = placed
+        # The optical axis, mapped exactly as _lon_theta maps every canvas
+        # pixel: longitude atan2(x, z) with 0 mid-canvas, polar angle from -Y.
+        fwd = np.asarray(R, np.float64)[:, 2]
+        fwd = fwd / np.linalg.norm(fwd)
+        placed_photos.append((i, float(math.atan2(fwd[0], fwd[2])),
+                              float(math.acos(max(-1.0, min(1.0, -fwd[1]))) - math.pi / 2)))
         tiles.append(tile)
         masks.append(mask)
         corners.append(corner)
@@ -497,7 +509,8 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
     pano, cover = blend_wrapped(tiles, masks, corners, width, height,
                                 find_seams=_find_seams)
     geom = SphereGeometry(circumference_px=float(width), equator_y=height / 2.0,
-                          coverage=cover, hfov_deg=hfov_deg, wrapped=True)
+                          coverage=cover, hfov_deg=hfov_deg, wrapped=True,
+                          photos=placed_photos)
     log.info("[orbit-worker] pose stitch rendered %d photo(s) onto a %dx%d "
              "equirectangular sphere", len(tiles), width, height)
     return True, pano, None, geom

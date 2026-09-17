@@ -160,6 +160,36 @@ const SphereViewer = (() => {
       entry.hotspots.length = 0;
       entry.data.hotspots = hotspots || [];
       attachHotspots(entry);
+      attachPhotoLabels(entry);
+    }
+
+    // ----------------------------------------------------------------------
+    // Photo labels
+    //
+    // "Photo 3 · ahead-right" pinned where each photo's centre landed, so a bad
+    // join can be named by the photos either side of it. They share the hotspot
+    // container - the engine keeps them on the sphere and hides them behind the
+    // camera - but are not hotspots: nothing to click, nothing to edit.
+    // ----------------------------------------------------------------------
+    const photoLabels = {};   // sceneId -> [{ yaw, pitch, text }]
+
+    function attachPhotoLabels(entry) {
+      (photoLabels[entry.data.id] || []).forEach((p) => {
+        const el = document.createElement("div");
+        el.className = "photo-label";
+        el.textContent = p.text;
+        entry.scene.hotspotContainer().createHotspot(el, { yaw: p.yaw, pitch: p.pitch });
+      });
+    }
+
+    /** Show labels on a scene, or pass an empty list to remove them. */
+    function setPhotoLabels(sceneId, labels) {
+      const entry = byId[sceneId];
+      if (!entry) return;
+      photoLabels[sceneId] = labels || [];
+      // Rebuilt through reloadHotspots, which clears the whole container:
+      // turning labels off must not leave the real hotspots behind, or on.
+      reloadHotspots(sceneId, entry.data.hotspots);
     }
 
     // ----------------------------------------------------------------------
@@ -344,6 +374,7 @@ const SphereViewer = (() => {
       currentSceneId() { return current.data.id; },
       scenes() { return built.map((b) => b.data); },
       reloadHotspots,
+      setPhotoLabels,
       /** Where the user is looking now - used to seed a new hotspot's angle. */
       lookDirection() {
         return { yaw: current.view.yaw(), pitch: current.view.pitch() };

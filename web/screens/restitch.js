@@ -10,28 +10,9 @@
 // is a guess until you rebuild and look, so it has to be a guess you can take
 // back; the photo and its files stay on the server either way.
 const ScreenRestitch = (() => {
-  // Where the camera was pointing, in words rather than numbers alone. The
-  // capture flow talks to people in compass terms ("turn a quarter turn to your
-  // RIGHT"), so the review of it should read the same way.
-  function facing(yaw) {
-    const y = ((Number(yaw) || 0) % 360 + 360) % 360;
-    const names = ["ahead", "ahead-right", "right", "behind-right",
-                   "behind", "behind-left", "left", "ahead-left"];
-    return names[Math.round(y / 45) % 8];
-  }
-
-  function tilt(pitch) {
-    const p = Math.round(Number(pitch) || 0);
-    if (p >= 30) return ", tilted up";
-    if (p <= -30) return ", tilted down";
-    return "";
-  }
-
-  function position(f) {
-    const y = Math.round(Number(f.yaw) || 0);
-    const p = Math.round(Number(f.pitch) || 0);
-    return `${facing(f.yaw)}${tilt(f.pitch)} · ${y}°, ${p >= 0 ? "+" : ""}${p}°`;
-  }
+  // Names and directions come from PhotoNames, shared with the 360 viewer's
+  // photo labels, so a photo is called the same thing on both screens.
+  const position = PhotoNames.position;
 
   // Deciding whether a photo is blurred, or of the wrong room, cannot be done
   // from a 56px square. Tapping one opens the full original - the actual upload,

@@ -385,6 +385,41 @@ const ScreenViewer = (() => {
         });
       }
 
+      // Photo numbers on the 360 itself. When a join looks wrong this is how
+      // to say which one - "between Photo 3 and Photo 4" - using the same
+      // numbers as the restitch screen, where that photo can then be removed.
+      // Off by default: they are for checking a stitch, not for looking at it.
+      if (manifest.renderer === "sphere" && (manifest.photos || []).length) {
+        let shown = false, labels = null;
+        const btn = mk("#", "Show photo numbers", async (b) => {
+          shown = !shown;
+          b.classList.toggle("off", !shown);
+          b.title = shown ? "Hide photo numbers" : "Show photo numbers";
+          if (shown && !labels) {
+            // Numbered against every photo of the capture, excluded ones too,
+            // so the numbers match the restitch screen exactly.
+            let frames = [];
+            try {
+              frames = (await OrbitAPI.listFrames(manifest.capture_id)).frames || [];
+            } catch (_) { /* numbered by index alone below */ }
+            const num = PhotoNames.numbers(frames);
+            const byIndex = {};
+            frames.forEach((f) => { byIndex[f.index] = f; });
+            labels = manifest.photos.map((p) => {
+              const f = byIndex[p.index];
+              const n = num[p.index] || p.index + 1;
+              return {
+                yaw: p.yaw, pitch: p.pitch,
+                text: f ? `Photo ${n} · ${PhotoNames.facing(f.yaw)}${PhotoNames.tilt(f.pitch)}`
+                        : `Photo ${n}`,
+              };
+            });
+          }
+          viewer.setPhotoLabels(manifest.capture_id, shown ? labels : []);
+        });
+        btn.classList.add("off");
+      }
+
       mk("−", "Zoom out", () => viewer.zoomOut());
       mk("+", "Zoom in", () => viewer.zoomIn());
       mk("↺", "Reset the view", () => viewer.resetView());

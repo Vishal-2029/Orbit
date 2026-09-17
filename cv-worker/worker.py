@@ -635,6 +635,16 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
             "vertical_max_deg": body.get("vertical_max_deg"),
             "holes": list(info.holes),
         })
+    # Where each photo sits on the finished sphere, so the viewer can label it
+    # "Photo 3" at the spot it actually landed. That is what lets someone point
+    # at a bad join by the photos either side of it - and it is the corrected
+    # position, after refinement and the ray solve, not the compass reading.
+    placed = getattr(geom, "photos", None) if geom is not None else None
+    if placed:
+        body["photos"] = [
+            {"index": int(ring[i]["index"]), "yaw": round(yaw, 5), "pitch": round(pitch, 5)}
+            for i, yaw, pitch in placed if 0 <= i < len(ring)]
+
     report_finalize(capture_id, body)
     log.info("%s stitch succeeded capture=%s size=%sx%s using %d of %d",
              PREFIX, capture_id, w, h, used, total)

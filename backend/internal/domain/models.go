@@ -126,7 +126,6 @@ type Frame struct {
 	Excluded bool `json:"excluded"`
 }
 
-
 // HotspotKind is which of the two things a hotspot is.
 const (
 	HotspotInfo = "info"
@@ -188,9 +187,9 @@ type Scene struct {
 	// when the worker produced a cube-tile pyramid for this capture. When it is
 	// empty the viewer falls back to the single equirectangular image, which
 	// works everywhere but cannot stay sharp when zoomed.
-	Tiles   string       `json:"tiles,omitempty"`
-	Preview string       `json:"preview,omitempty"`
-	Levels  []TileLevel  `json:"levels,omitempty"`
+	Tiles   string      `json:"tiles,omitempty"`
+	Preview string      `json:"preview,omitempty"`
+	Levels  []TileLevel `json:"levels,omitempty"`
 
 	Hotspots []Hotspot `json:"hotspots"`
 }
@@ -201,6 +200,20 @@ type TileLevel struct {
 	TileSize     int  `json:"tileSize"`
 	Size         int  `json:"size"`
 	FallbackOnly bool `json:"fallbackOnly,omitempty"`
+}
+
+// PhotoMarker is where one photo's centre landed on a finished sphere.
+//
+// Index is the frame index, the same one the restitch screen and the frames
+// endpoint use, so "Photo 3" in the viewer is Photo 3 there. Yaw and pitch are
+// radians in the viewer's frame, like hotspots: yaw 0 mid-panorama and growing
+// rightwards, pitch positive downwards. It is the position AFTER refinement,
+// not the compass reading, because a label has to sit on the photo itself for
+// "the join between 3 and 4 is wrong" to point at the right place.
+type PhotoMarker struct {
+	Index int     `json:"index"`
+	Yaw   float64 `json:"yaw"`
+	Pitch float64 `json:"pitch"`
 }
 
 // Manifest is what the viewer downloads. It is deliberately self-contained:
@@ -232,6 +245,9 @@ type Manifest struct {
 	// Hotspots on THIS capture. Kept alongside Scenes rather than only inside
 	// it so a client that predates scenes still finds them.
 	Hotspots []Hotspot `json:"hotspots,omitempty"`
+
+	// Photos places each photo on the sphere, for the viewer's photo labels.
+	Photos []PhotoMarker `json:"photos,omitempty"`
 
 	// Scenes is this capture plus every other one reachable from it through a
 	// link hotspot, so the viewer can walk a tour without another round trip.

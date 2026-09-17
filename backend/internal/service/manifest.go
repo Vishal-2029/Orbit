@@ -30,6 +30,9 @@ type FinalizeInput struct {
 	// so this is the honest ceiling on how complete the 360 can look.
 	SphereCoverage float64 `json:"sphere_coverage"`
 
+	// Photos is where each photo's centre landed, when the stitcher knows.
+	Photos []domain.PhotoMarker `json:"photos"`
+
 	// FaceSize and TileLevels describe the cube-tile pyramid, when the worker
 	// managed to cut one. Tiles are an optimisation, not a requirement: absent
 	// these, the manifest simply points at the equirectangular JPEG and the
@@ -107,6 +110,7 @@ func (s *Capture) Finalize(ctx context.Context, captureID string, in FinalizeInp
 		m.Panorama = s.PublicURL(captureID, "panorama", 0, ver)
 		m.Width, m.Height = in.Width, in.Height
 		m.Coverage = in.SphereCoverage
+		m.Photos = in.Photos
 		if len(in.TileLevels) > 0 {
 			// A URL TEMPLATE, not a URL. The viewer expands {z}, {f}, {y} and
 			// {x} per tile, so the placeholders have to survive into the
