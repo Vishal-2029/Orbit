@@ -100,7 +100,7 @@ class SphereGeometry(collections.namedtuple(
     __slots__ = ()
 
 
-# photos: [(image_index, yaw_rad, pitch_rad)] - where each placed photo's centre
+# photos: [(image_index, yaw_rad, pitch_rad, roll_rad)] - where each placed photo's centre
 # landed, in the viewer's frame (yaw 0 mid-panorama, growing rightwards; pitch
 # positive downwards). Labels on the finished 360 are drawn from it, so a
 # photo can be named exactly where it sits after refinement and the ray solve,
@@ -198,6 +198,57 @@ def camera_rotation(quat):
     return (_PHONE_TO_WARPER @ r_world_from_device @ _CAM_TO_DEVICE).astype(np.float32)
 
 
+def _level_axes(fwd, yaw):
+    """The camera's right and down axes for a photo held level, looking along
+    fwd. Roll is measured from these, so an ordinary upright photo reads as
+    roll 0 rather than a half turn.
+
+    Straight up or down leaves "which way is left" undefined, so there the axis
+    is taken from the yaw instead.
+    """
+    up = np.array([0.0, -1.0, 0.0])
+    right = np.cross(fwd, up)
+    if np.linalg.norm(right) < 1e-8:
+        right = np.array([-math.cos(yaw), 0.0, math.sin(yaw)])
+    right /= np.linalg.norm(right)
+    return right, np.cross(fwd, right)
+
+
+def rotation_from_view(yaw, pitch, roll=0.0):
+    """Camera-to-world rotation from a position given the way the VIEWER states
+    one: yaw 0 mid-panorama and growing rightwards, pitch positive downwards,
+    roll about the optical axis. Radians.
+
+    The inverse of how a placed photo's centre is reported (see the optical-axis
+    block in _stitch_equirect), so a position read off the finished 360 - or
+    dragged on the arrange screen - comes back to exactly the same camera.
+    """
+    t = float(pitch) + math.pi / 2.0          # polar angle from the zenith
+    fwd = np.array([math.sin(t) * math.sin(yaw),
+                    -math.cos(t),
+                    math.sin(t) * math.cos(yaw)], dtype=np.float64)
+    fwd /= np.linalg.norm(fwd)
+
+    right, down = _level_axes(fwd, yaw)
+
+    cr, sr = math.cos(roll), math.sin(roll)
+    r_axis = right * cr + down * sr
+    d_axis = -right * sr + down * cr
+    return np.column_stack([r_axis, d_axis, fwd]).astype(np.float32)
+
+
+def view_from_rotation(R):
+    """(yaw, pitch, roll) in the viewer's frame, from a camera-to-world
+    rotation. The exact inverse of rotation_from_view."""
+    R = np.asarray(R, np.float64)
+    fwd = R[:, 2] / np.linalg.norm(R[:, 2])
+    yaw = math.atan2(fwd[0], fwd[2])
+    pitch = math.acos(max(-1.0, min(1.0, -fwd[1]))) - math.pi / 2.0
+    right, down = _level_axes(fwd, yaw)
+    roll = math.atan2(float(R[:, 0] @ down), float(R[:, 0] @ right))
+    return yaw, pitch, roll
+
+
 def intrinsics(width, height, hfov_deg=DEFAULT_HFOV_DEG):
     """Pinhole camera matrix and focal length in pixels."""
     f = (width / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
@@ -290,7 +341,7 @@ def _try_ray_solve(images, sensor_rotations, rotations, shifts, hfov_deg):
     return rotations, shifts, hfov_deg
 
 
-def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
+def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None):
     """Project photos onto a sphere using their recorded rotations.
 
     images: list of BGR arrays.
@@ -338,6 +389,23 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG):
             rotations, shifts, hfov_deg = _try_ray_solve(
                 [images[i] for i in usable], sensor_rotations,
                 rotations, shifts, hfov_deg)
+
+        # A photo locked by hand is placed exactly where it was put. It is used
+        # where the photos cannot say - a blank wall, a window of repeating
+        # mullions - so there is nothing for a solver to improve on, and the
+        # last word has to be the person's. Applied after both solves rather
+        # than before, so neither can quietly walk it off its mark.
+        if locked:
+            pinned = 0
+            for k, i in enumerate(usable):
+                R = locked[i] if i < len(locked) else None
+                if R is not None:
+                    rotations[k] = np.asarray(R, np.float32)
+                    shifts[k] = (0.0, 0.0)
+                    pinned += 1
+            if pinned:
+                log.info("[orbit-worker] %d photo(s) placed by hand; left where "
+                         "they were put", pinned)
 
         if settings.equirect_render:
             return _stitch_equirect(images, usable, rotations, shifts, hfov_deg)
@@ -469,7 +537,7 @@ def _nadir_fills_holes_only(tiles, masks, corners, photos, width, height):
     only genuine holes. Masks are edited in place; nothing is removed from the
     lists, so they stay aligned with `photos`.
     """
-    nadir = {k for k, (_, _, pitch) in enumerate(photos)
+    nadir = {k for k, (_, _, pitch, _) in enumerate(photos)
              if math.degrees(pitch) > NADIR_PHOTO_DEG}
     if not nadir or len(nadir) == len(masks):
         return
@@ -539,12 +607,11 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
         if placed is None:
             continue
         tile, mask, corner = placed
-        # The optical axis, mapped exactly as _lon_theta maps every canvas
-        # pixel: longitude atan2(x, z) with 0 mid-canvas, polar angle from -Y.
-        fwd = np.asarray(R, np.float64)[:, 2]
-        fwd = fwd / np.linalg.norm(fwd)
-        placed_photos.append((i, float(math.atan2(fwd[0], fwd[2])),
-                              float(math.acos(max(-1.0, min(1.0, -fwd[1]))) - math.pi / 2)))
+        # Where this photo's centre landed, and which way up it is, stated the
+        # way the viewer states a direction. view_from_rotation is the exact
+        # inverse of rotation_from_view, so a photo dragged on the arrange
+        # screen and locked comes back to precisely this camera.
+        placed_photos.append((i,) + view_from_rotation(R))
         tiles.append(tile)
         masks.append(mask)
         corners.append(corner)

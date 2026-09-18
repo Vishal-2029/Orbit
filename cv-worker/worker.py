@@ -35,7 +35,7 @@ from ops.feature_stitch import stitch_with_features
 from ops.finish import MIN_SPHERE_COVERAGE, finish_panorama
 from ops.coverage import describe_leftovers, sphere_coverage
 from ops.pose_stitch import (quaternion_from_heading, quaternion_to_matrix,
-                             stitch_with_poses)
+                             rotation_from_view, stitch_with_poses)
 from ops.xmp import add_photosphere_metadata
 
 try:
@@ -299,6 +299,25 @@ def _quat_of(frame):
         return None
     # An all-zero quaternion carries no rotation and would divide by zero.
     return vals if any(abs(v) > 1e-9 for v in vals) else None
+
+
+def _manual_rotation(frame):
+    """The rotation a person pinned this photo to, or None.
+
+    Only when it is LOCKED: the numbers survive an unlock so that arranging is
+    not lost by changing one's mind, but they are an instruction to the build
+    only while the lock is on.
+    """
+    if not frame.get("manual_locked"):
+        return None
+    yaw, pitch = frame.get("manual_yaw"), frame.get("manual_pitch")
+    if yaw is None or pitch is None:
+        return None
+    try:
+        return rotation_from_view(float(yaw), float(pitch),
+                                  float(frame.get("manual_roll") or 0.0))
+    except (TypeError, ValueError):
+        return None
 
 
 def _pose_of(frame):
@@ -651,8 +670,9 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
     placed = getattr(geom, "photos", None) if geom is not None else None
     if placed:
         body["photos"] = [
-            {"index": int(ring[i]["index"]), "yaw": round(yaw, 5), "pitch": round(pitch, 5)}
-            for i, yaw, pitch in placed if 0 <= i < len(ring)]
+            {"index": int(ring[i]["index"]), "yaw": round(yaw, 5),
+             "pitch": round(pitch, 5), "roll": round(roll, 5)}
+            for i, yaw, pitch, roll in placed if 0 <= i < len(ring)]
 
     report_finalize(capture_id, body)
     log.info("%s stitch succeeded capture=%s size=%sx%s using %d of %d",
@@ -724,7 +744,10 @@ def handle_ring_job(mc, capture_id, ring):
     quats = [_pose_of(f) for f in loaded]
     ok, pano, reason, geom = (False, None, "No photo carries camera rotation data.", None)
     if sum(1 for q in quats if q is not None) >= len(quats) * 0.8:
-        ok, pano, reason, geom = stitch_with_poses(images, quats)
+        # Photos placed by hand are anchors: the build puts them exactly where
+        # they were put, and no solve may move them.
+        locked = [_manual_rotation(f) for f in ring]
+        ok, pano, reason, geom = stitch_with_poses(images, quats, locked=locked)
     if not ok or pano is None:
         ok, pano, reason, geom, _ = stitch_with_features(images)
     _release(images)
@@ -930,7 +953,10 @@ def handle_finalize_job(mc, job, attempt=1):
             {"index": f.get("index"), "yaw": f.get("yaw"), "pitch": f.get("pitch"),
              "quat": q, "camera_pitch_deg": None if q is None else round(_pitch_of(q), 2)}
             for f, q in zip(ring, quats)])
-        ok, pano, reason, geom = stitch_with_poses(images, quats)
+        # Photos placed by hand are anchors: the build puts them exactly where
+        # they were put, and no solve may move them.
+        ok, pano, reason, geom = stitch_with_poses(
+            images, quats, locked=[_manual_rotation(f) for f in ring])
         if ok and pano is not None:
             src_h, src_w = images[0].shape[:2]
             coverage = sphere_coverage(
