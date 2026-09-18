@@ -262,8 +262,52 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 .film.locked span { color: var(--good); }
 .film.on { border-color: #ffd84d; }
 .arrange-stage {
+  position: relative;
   background: #0b0d12; border: 1px solid #1f2530; border-radius: 12px;
   padding: 6px; margin-bottom: 12px; overflow: hidden;
+}
+
+/* The model is a room to look around, not a panel to peer into - on a phone
+   especially - so it takes the whole screen and gives it back. */
+.arrange-stage.fullscreen {
+  position: fixed; inset: 0; z-index: 80;
+  margin: 0; padding: 0; border: 0; border-radius: 0;
+  display: flex; flex-direction: column;
+}
+.arrange-stage.fullscreen .arrange-3d { flex: 1; min-height: 0; }
+.arrange-stage.fullscreen .arrange-3d canvas { height: 100%; }
+body.no-scroll { overflow: hidden; }
+
+/* The stepper over the picture, because that is where the eyes are. */
+.stage-bar {
+  position: absolute; top: 10px; left: 10px; right: 10px; z-index: 2;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  pointer-events: none;
+}
+.stage-bar > * { pointer-events: auto; }
+.stage-step-group {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(10,12,18,.78); border-radius: 999px; padding: 4px 6px;
+  backdrop-filter: blur(6px);
+}
+.stage-step-group button {
+  width: 34px; height: 34px; padding: 0; border-radius: 50%;
+  background: rgba(255,255,255,.08); font-size: 18px; line-height: 1;
+}
+.stage-step-group span { font-variant-numeric: tabular-nums; font-size: .85rem; padding: 0 2px; }
+.stage-now {
+  background: rgba(10,12,18,.78); border-radius: 999px; padding: 7px 12px;
+  font-size: .82rem; color: #c7ced9; backdrop-filter: blur(6px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 52%;
+}
+.stage-lock, #fsExit {
+  margin-left: auto; padding: 7px 14px; border-radius: 999px;
+  background: rgba(10,12,18,.78); font-size: .82rem; backdrop-filter: blur(6px);
+}
+.stage-lock { margin-left: 0; }
+
+.arrange-stage.fullscreen .stage-bar {
+  top: calc(10px + env(safe-area-inset-top, 0px));
 }
 .arrange-stage canvas {
   display: block; width: 100%; height: auto;
@@ -278,6 +322,17 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
   font-size: .8rem; line-height: 1; cursor: pointer; white-space: nowrap;
 }
 .ring-build:disabled { opacity: .5; cursor: default; }
+
+/* A phone holds one thing at a time: stack the controls, make them thumb-sized,
+   and let the filmstrip scroll rather than squeeze. */
+@media (max-width: 720px) {
+  .arrange-now-head { flex-direction: column; align-items: stretch; gap: 8px; }
+  .arrange-step { margin-left: 0; justify-content: space-between; }
+  .arrange-actions button, .arrange-steps button { flex: 1 1 auto; min-height: 44px; }
+  .stage-now { max-width: 100%; order: 3; }
+  .film { width: 56px; height: 56px; }
+  .chip { min-height: 34px; }
+}
 
 /* A ring's own stitch, shown above its photos on the restitch screen. */
 .ring-preview {
