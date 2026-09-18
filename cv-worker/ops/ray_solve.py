@@ -44,6 +44,24 @@ INLIER_PX = 4.0
 # Fewer agreeing rays than this and the pair says nothing trustworthy.
 MIN_INLIERS = 8
 
+# And they must be a real SHARE of the pair's matches, not a handful out of a
+# crowd. A window of repeating mullions matched 111 points between two photos
+# of which 5 fitted any rotation - one bay matched to the next, confidently and
+# wrongly. Judged on count alone those pairs look usable; judged on share they
+# are what they are. Good pairs on the same capture ran 30-50%.
+MIN_INLIER_SHARE = 0.25
+
+# What "solved" has to mean in absolute terms, in pixels at the working width.
+# Comparing a candidate only against what came before rewards whichever fits
+# the noise best: on synthetic photos whose rotations were exact, a solve that
+# moved cameras 55 degrees still "improved" on the truth, because both were
+# scored against the same false matches.
+MAX_SOLVED_RESIDUAL_PX = 8.0
+
+# The most the average camera may move. A capture's sensor is wrong in places,
+# not everywhere: a mean correction beyond this is a solve fitting noise.
+MAX_MEAN_CORRECTION_DEG = 12.0
+
 # The sensor is trusted very differently about the two halves of a rotation.
 #
 # TILT - pitch and roll - comes from gravity, which the phone always knows.
@@ -73,6 +91,19 @@ MAX_YAW_CORRECTION_DEG = 60.0
 # Residual, in degrees, beyond which a pair is progressively down-weighted, so
 # one false match cannot drag its cameras across the sphere.
 ROBUST_SCALE_DEG = 3.0
+
+# How much the solve may change the SPREAD of the capture - how far apart the
+# photos point, taken as a whole - before it is refused.
+#
+# A too-narrow lens and correspondingly squeezed rotations fit the overlaps as
+# well as the truth does: the matched points land just as close, so neither the
+# pair count nor the pixel error can tell them apart. On a synthetic ring shot
+# at 65 degrees the solve chose 57, compressed every heading to suit, and
+# turned a full turn into 191 degrees - while reporting matched points 2.2 px
+# apart. What it cannot fake is the spread: a capture that went all the way
+# round still has to, whatever the lens. Rearranging photos is allowed;
+# rescaling the whole capture is not.
+MAX_SPREAD_CHANGE = 0.15
 
 # World up in the warper's frame (+Y is down). Only the axis matters here.
 _VERTICAL = np.array([0.0, 1.0, 0.0])
@@ -164,7 +195,7 @@ class RaySolver:
             inl = np.linalg.norm(_project(ra, R, K) - pb, axis=1) < INLIER_PX
             if best is None or inl.sum() > best.sum():
                 best = inl
-        if best.sum() < MIN_INLIERS:
+        if best.sum() < MIN_INLIERS or best.mean() < MIN_INLIER_SHARE:
             return None, best
         return _kabsch(ra[best], rb[best]), best
 
@@ -282,7 +313,25 @@ class RaySolver:
             log.info("[orbit-worker] ray solve came apart (a camera tilted %.0f deg, "
                      "turned %.0f deg); not used", max(tilts), max(yaws))
             return None
+        spread_ratio = _spread(solved) / max(1e-6, _spread(self.sensor))
+        if abs(spread_ratio - 1.0) > MAX_SPREAD_CHANGE:
+            log.info("[orbit-worker] ray solve rescaled the capture (%.0f%% of the "
+                     "spread the sensor reported, lens %.0f deg); not used",
+                     spread_ratio * 100, fov)
+            return None
+
         moved = [_angle(self.sensor[i], solved[i]) for i in range(n)]
+        if float(np.mean(moved)) > MAX_MEAN_CORRECTION_DEG:
+            log.info("[orbit-worker] ray solve moved every camera (%.0f deg on "
+                     "average); not used", float(np.mean(moved)))
+            return None
+
+        residual = self.error(solved, fov, None, set(rel))
+        if residual > MAX_SOLVED_RESIDUAL_PX:
+            log.info("[orbit-worker] ray solve left matched points %.0f px apart; "
+                     "not used", residual)
+            return None
+
         stats = {"hfov_deg": fov, "fov_score": fov_score, "pairs": len(rel),
                  "pair_keys": set(rel),
                  "pairs_matched": len(self.pairs),
@@ -291,6 +340,16 @@ class RaySolver:
                  "max_tilt_correction_deg": float(max(tilts)),
                  "max_yaw_correction_deg": float(max(yaws))}
         return solved, fov, stats
+
+
+def _spread(rotations):
+    """How far apart these cameras point, as one number: the median angle
+    between every pair of optical axes. Unchanged by turning the whole capture,
+    and roughly halved if the capture is squeezed into half the sphere."""
+    fwd = [np.asarray(R, float)[:, 2] for R in rotations]
+    angles = [math.degrees(math.acos(np.clip(fwd[a] @ fwd[b], -1, 1)))
+              for a in range(len(fwd)) for b in range(a + 1, len(fwd))]
+    return float(np.median(angles)) if angles else 0.0
 
 
 def _correction_tilt_yaw(C):
