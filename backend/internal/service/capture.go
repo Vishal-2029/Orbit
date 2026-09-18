@@ -442,6 +442,16 @@ func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Captur
 	return s.repo.GetCapture(ctx, captureID)
 }
 
+// SetFramePose places one photo by hand, and locks it there.
+//
+// A locked photo is an anchor: the build puts it exactly here and no solve may
+// move it. That is the point - it is used where the photos themselves cannot
+// say, so there is nothing for a solver to improve on.
+func (s *Capture) SetFramePose(ctx context.Context, captureID string, idx int,
+	yaw, pitch, roll *float64, locked bool) error {
+	return s.repo.SetFramePose(ctx, captureID, idx, yaw, pitch, roll, locked)
+}
+
 // SetFrameExcluded holds one photo back from the next build, or puts it back.
 func (s *Capture) SetFrameExcluded(ctx context.Context, captureID string, idx int, excluded bool) error {
 	return s.repo.SetFrameExcluded(ctx, captureID, idx, excluded)

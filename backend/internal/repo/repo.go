@@ -220,7 +220,8 @@ func (r *Repo) ListFrames(ctx context.Context, captureID string) ([]domain.Frame
 		SELECT id, capture_id, idx, COALESCE(slot_id,''), COALESCE(yaw,0), COALESCE(pitch,0),
 		       original_key, COALESCE(processed_key,''), COALESCE(thumb_key,''),
 		       COALESCE(width,0), COALESCE(height,0), status, error,
-		       qx, qy, qz, qw, COALESCE(orientation_source,''), excluded
+		       qx, qy, qz, qw, COALESCE(orientation_source,''), excluded,
+		       manual_yaw, manual_pitch, manual_roll, manual_locked
 		FROM frames WHERE capture_id=$1 ORDER BY idx`, captureID)
 	if err != nil {
 		if isBadUUID(err) {
@@ -236,7 +237,8 @@ func (r *Repo) ListFrames(ctx context.Context, captureID string) ([]domain.Frame
 		if err := rows.Scan(&f.ID, &f.CaptureID, &f.Index, &f.SlotID, &f.Yaw, &f.Pitch,
 			&f.OriginalKey, &f.ProcessedKey, &f.ThumbKey, &f.Width, &f.Height,
 			&f.Status, &f.Error, &qx, &qy, &qz, &qw, &f.OrientationSource,
-			&f.Excluded); err != nil {
+			&f.Excluded, &f.ManualYaw, &f.ManualPitch, &f.ManualRoll,
+			&f.ManualLocked); err != nil {
 			return nil, err
 		}
 		if qx != nil && qy != nil && qz != nil && qw != nil {
@@ -375,6 +377,27 @@ func (r *Repo) SetFrameExcluded(ctx context.Context, captureID string, idx int, 
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE frames SET excluded=$3 WHERE capture_id=$1 AND idx=$2`,
 		captureID, idx, excluded)
+	if err != nil {
+		if isBadUUID(err) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetFramePose records where a person put one photo, and whether it is locked
+// there. Passing nil for the angles clears them, which is how "put it back" is
+// expressed - the solve then has nothing of ours to honour.
+func (r *Repo) SetFramePose(ctx context.Context, captureID string, idx int,
+	yaw, pitch, roll *float64, locked bool) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE frames SET manual_yaw=$3, manual_pitch=$4, manual_roll=$5,
+		                  manual_locked=$6
+		WHERE capture_id=$1 AND idx=$2`, captureID, idx, yaw, pitch, roll, locked)
 	if err != nil {
 		if isBadUUID(err) {
 			return ErrNotFound

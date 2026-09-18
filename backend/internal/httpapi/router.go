@@ -377,15 +377,31 @@ func (s *Server) patchFrame(c *fiber.Ctx) error {
 	}
 	var body struct {
 		Excluded *bool `json:"excluded"`
+		// Where a person put this photo, in radians in the viewer's frame, and
+		// whether it is locked there. Sent by the arrange screen; "locked"
+		// alone re-locks a photo at the position it already has.
+		Yaw    *float64 `json:"manual_yaw"`
+		Pitch  *float64 `json:"manual_pitch"`
+		Roll   *float64 `json:"manual_roll"`
+		Locked *bool    `json:"manual_locked"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "body must be JSON")
 	}
-	if body.Excluded == nil {
-		return fiber.NewError(fiber.StatusBadRequest, `"excluded" is required (true or false)`)
+	if body.Excluded == nil && body.Locked == nil {
+		return fiber.NewError(fiber.StatusBadRequest,
+			`"excluded" or "manual_locked" is required`)
 	}
-	if err := s.svc.SetFrameExcluded(c.Context(), c.Params("id"), idx, *body.Excluded); err != nil {
-		return err
+	if body.Excluded != nil {
+		if err := s.svc.SetFrameExcluded(c.Context(), c.Params("id"), idx, *body.Excluded); err != nil {
+			return err
+		}
+	}
+	if body.Locked != nil {
+		if err := s.svc.SetFramePose(c.Context(), c.Params("id"), idx,
+			body.Yaw, body.Pitch, body.Roll, *body.Locked); err != nil {
+			return err
+		}
 	}
 	frames, err := s.svc.Frames(c.Context(), c.Params("id"))
 	if err != nil {

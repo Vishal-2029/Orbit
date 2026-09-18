@@ -119,6 +119,18 @@ type Frame struct {
 	Height            int     `json:"height"`
 	Status            string  `json:"status"`
 	Error             *string `json:"error,omitempty"`
+	// ManualYaw, ManualPitch and ManualRoll are where a person put this photo,
+	// in radians in the viewer's frame - yaw 0 mid-panorama growing rightwards,
+	// pitch positive downwards. Nil until somebody moves it.
+	//
+	// ManualLocked is the instruction that goes with them: placed exactly here,
+	// and no solve may move it. Separate from the numbers so that unlocking and
+	// locking again does not lose the arrangement.
+	ManualYaw    *float64 `json:"manual_yaw,omitempty"`
+	ManualPitch  *float64 `json:"manual_pitch,omitempty"`
+	ManualRoll   *float64 `json:"manual_roll,omitempty"`
+	ManualLocked bool     `json:"manual_locked"`
+
 	// Excluded holds this photo back from the next build without deleting it.
 	// Which photo is spoiling a stitch is a guess until you try it, so this is
 	// made to be taken back: the row and its files stay put, and a rebuild
@@ -234,6 +246,10 @@ type PhotoMarker struct {
 	Index int     `json:"index"`
 	Yaw   float64 `json:"yaw"`
 	Pitch float64 `json:"pitch"`
+	// Roll is which way up the photo landed, about its optical axis. Zero for
+	// an ordinary upright shot; the arrange screen needs it to draw the photo
+	// as it will actually be placed.
+	Roll float64 `json:"roll,omitempty"`
 }
 
 // Manifest is what the viewer downloads. It is deliberately self-contained:
