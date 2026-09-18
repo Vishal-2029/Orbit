@@ -122,10 +122,21 @@ const Arrange3D = (() => {
           mesh.material.map = t;
           mesh.material.color.setHex(0xffffff);
         }
-        mesh.material.opacity = focused ? 1 : 0.32;
-        mesh.userData.edge.material.color.setHex(
-          focused ? 0xffd84d : it.locked ? 0x35d07f : 0x5a6478);
-        mesh.userData.label.material.map = labelTexture(String(it.n), it.locked);
+        // The photo in hand and its two neighbours are what a fix is judged
+        // against, so they are lit and coloured; the rest stay as context.
+        const role = opts.roleOf ? opts.roleOf(it) : (focused ? "focus" : "other");
+        const look = {
+          focus: { edge: 0xffd84d, opacity: 1 },
+          prev: { edge: 0x5b8cff, opacity: 0.6 },
+          next: { edge: 0xff9f43, opacity: 0.6 },
+          other: { edge: it.locked ? 0x35d07f : 0x5a6478, opacity: 0.3 },
+        }[role];
+        mesh.material.opacity = look.opacity;
+        mesh.userData.edge.material.color.setHex(look.edge);
+        mesh.userData.label.material.map = labelTexture(
+          role === "prev" ? `\u2039 ${it.n}` : role === "next" ? `${it.n} \u203a` : String(it.n),
+          it.locked);
+        mesh.userData.label.visible = role !== "other";
         mesh.userData.label.material.needsUpdate = true;
         mesh.renderOrder = focused ? 2 : 1;
       });
@@ -151,8 +162,36 @@ const Arrange3D = (() => {
       return { x: p.clientX, y: p.clientY };
     }
 
+    // Where the cursor points, as a direction in the world.
+    function pickDirection(ev) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const p = ev.touches ? ev.touches[0] : ev;
+      const mouse = new THREE.Vector2(
+        ((p.clientX - rect.left) / rect.width) * 2 - 1,
+        -((p.clientY - rect.top) / rect.height) * 2 + 1);
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(mouse, camera);
+      return ray.ray.direction.clone().normalize();
+    }
+
+    function hitMesh(ev) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const p = ev.touches ? ev.touches[0] : ev;
+      const mouse = new THREE.Vector2(
+        ((p.clientX - rect.left) / rect.width) * 2 - 1,
+        -((p.clientY - rect.top) / rect.height) * 2 + 1);
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(mouse, camera);
+      return ray.intersectObjects(meshes.filter((m) => m.visible), false)[0];
+    }
+
     function onDown(ev) {
-      dragging = Object.assign(point(ev), { moved: false });
+      // Taking hold of the photo in hand moves it; anywhere else turns the
+      // head. Same rule as the flat map, so neither view has to be learned
+      // separately.
+      const hit = hitMesh(ev);
+      const onFocused = hit && opts.isFocused && opts.isFocused(hit.object.userData.item);
+      dragging = Object.assign(point(ev), { moved: false, moving: !!onFocused });
       ev.preventDefault();
     }
     function onMove(ev) {
@@ -160,6 +199,20 @@ const Arrange3D = (() => {
       const p = point(ev);
       const dx = p.x - dragging.x, dy = p.y - dragging.y;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragging.moved = true;
+
+      if (dragging.moving && opts.onMove) {
+        // The photo follows the cursor: wherever you point is where it goes.
+        const d = pickDirection(ev);
+        const newYaw = Math.atan2(d.x, -d.z);
+        const newPitch = Math.asin(Math.max(-1, Math.min(1, -d.y)));
+        const it = meshes.find((m) => opts.isFocused(m.userData.item)).userData.item;
+        opts.onMove(it, newYaw, newPitch);
+        dragging.x = p.x; dragging.y = p.y;
+        refresh();
+        ev.preventDefault();
+        return;
+      }
+
       yaw -= dx * 0.005;
       pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, pitch + dy * 0.005));
       dragging.x = p.x; dragging.y = p.y;
@@ -199,7 +252,10 @@ const Arrange3D = (() => {
 
     function resize() {
       const w = host.clientWidth || 640;
-      const h = Math.max(320, Math.round(w * 0.5));
+      // Full screen gives the model the height it has; inline it keeps a 2:1
+      // strip so the page around it still reads.
+      const h = host.clientHeight > 80 ? host.clientHeight
+        : Math.max(320, Math.round(w * 0.5));
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
