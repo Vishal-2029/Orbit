@@ -214,6 +214,30 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 .ring-hint { color: var(--muted); font-size: .82rem; }
 .ring-count { margin-left: auto; color: var(--muted); font-size: .82rem; }
 
+/* Placing the photos by hand. The map is the work, so it gets the width. */
+.arrange-wrap { max-width: 1400px; }
+.arrange-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px;
+}
+.arrange-actions .muted { margin-left: auto; font-size: .85rem; }
+.arrange-stage {
+  background: #0b0d12; border: 1px solid #1f2530; border-radius: 12px;
+  padding: 6px; margin-bottom: 12px; overflow: hidden;
+}
+.arrange-stage canvas {
+  display: block; width: 100%; height: auto;
+  touch-action: none;      /* dragging a photo must not scroll the page */
+  cursor: grab;
+}
+#rollRange { width: 100%; margin-top: 6px; }
+
+.ring-build {
+  padding: 5px 11px; border: 0; border-radius: 999px;
+  background: rgba(96,141,255,.18); color: #9ab6ff;
+  font-size: .8rem; line-height: 1; cursor: pointer; white-space: nowrap;
+}
+.ring-build:disabled { opacity: .5; cursor: default; }
+
 /* A ring's own stitch, shown above its photos on the restitch screen. */
 .ring-preview {
   background: var(--panel); border-radius: 12px; padding: 8px; margin-bottom: 8px;

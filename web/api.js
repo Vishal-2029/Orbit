@@ -99,6 +99,14 @@ const OrbitAPI = (() => {
     setFrameExcluded(id, index, excluded) {
       return req("PATCH", `/api/v1/captures/${id}/frames/${index}`, { excluded });
     },
+    // Where a person put one photo, and whether it is locked there. Radians in
+    // the viewer's frame, the same as hotspots and manifest.photos.
+    setFramePose(id, index, { yaw, pitch, roll, locked }) {
+      return req("PATCH", `/api/v1/captures/${id}/frames/${index}`, {
+        manual_yaw: yaw, manual_pitch: pitch, manual_roll: roll || 0,
+        manual_locked: !!locked,
+      });
+    },
     getManifest(id) {
       return req("GET", `/api/v1/captures/${id}/manifest`);
     },
