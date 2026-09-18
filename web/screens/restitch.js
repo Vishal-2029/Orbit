@@ -169,6 +169,11 @@ const ScreenRestitch = (() => {
           </div>
           <div id="rows"></div>
           <div class="card">
+            <button id="arrangeBtn" style="width:100%;margin-bottom:10px">Place the photos by hand</button>
+            <div class="muted" style="margin:-4px 0 12px;font-size:.85rem">
+              For a join the stitcher cannot work out on its own — a blank wall,
+              a repeating window. Every photo, whole, where it would be placed.
+            </div>
             <button class="primary" id="goBtn" style="width:100%">Build it again</button>
             <div class="muted" id="goNote" style="margin-top:8px;font-size:.85rem">
               Uses the photos above. The previous result is replaced.
@@ -207,12 +212,20 @@ const ScreenRestitch = (() => {
         const state = row
           ? `<span class="badge ${row.status === "ready" ? "ready" : row.status === "failed" ? "failed" : "processing"}">${escapeHtml(row.status)}</span>`
           : "";
+        // A capture shot before rings were stitched separately has none, and a
+        // ring can always be built again after a photo is removed from it.
+        // Either way the button says the same thing: build this ring alone.
+        const busy = row && (row.status === "queued" || row.status === "processing");
+        const ringBtn = used >= 2
+          ? `<button class="ring-build" data-ring="${escapeHtml(g.ring.id)}" ${busy ? "disabled" : ""}>${busy ? "Stitching\u2026" : row ? "Stitch again" : "Stitch this ring"}</button>`
+          : "";
         return `
           <div class="ring-head">
             <span class="ring-name">${escapeHtml(g.ring.label)}</span>
             <span class="ring-hint">${escapeHtml(g.ring.hint)}</span>
             ${state}
             <span class="ring-count">${used} of ${g.frames.length}</span>
+            ${ringBtn}
           </div>
           ${preview}
           ${g.frames.map((f) => rowHtml(f, num[f.index], ver)).join("")}`;
@@ -224,6 +237,23 @@ const ScreenRestitch = (() => {
       if (used === 0) {
         goNote.textContent = "Put at least one photo back to build.";
       }
+
+      rows.querySelectorAll(".ring-build").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.dataset.ring;
+          btn.disabled = true;
+          btn.textContent = "Stitching\u2026";
+          try {
+            await OrbitAPI.processRing(captureId, id);
+            ringRows[id] = Object.assign({}, ringRows[id] || {}, { ring: id, status: "queued" });
+            watchRings();
+          } catch (e) {
+            btn.disabled = false;
+            btn.textContent = "Could not start";
+            btn.title = e.message;
+          }
+        });
+      });
 
       const openers = Array.from(rows.querySelectorAll(".photo-open"));
       openers.forEach((img, i) => {
@@ -244,6 +274,30 @@ const ScreenRestitch = (() => {
             const res = await OrbitAPI.setFrameExcluded(captureId, idx, !f.excluded);
             frames = res.frames || frames;
             draw();
+
+    // While a ring is stitching, keep asking until it lands. Only runs while
+    // one is actually in flight, and stops itself when none is.
+    let ringTimer = null;
+    function watchRings() {
+      if (ringTimer) return;
+      ringTimer = setInterval(async () => {
+        let rings = [];
+        try {
+          rings = (await OrbitAPI.listRings(captureId)).rings || [];
+        } catch (_) {
+          return;
+        }
+        rings.forEach((r) => { ringRows[r.ring] = r; });
+        draw();
+        if (!rings.some((r) => r.status === "queued" || r.status === "processing")) {
+          clearInterval(ringTimer);
+          ringTimer = null;
+        }
+      }, 4000);
+    }
+    if (Object.values(ringRows).some((r) => r.status === "queued" || r.status === "processing")) {
+      watchRings();
+    }
           } catch (e) {
             btn.disabled = false;
             btn.textContent = "Failed";
@@ -254,6 +308,10 @@ const ScreenRestitch = (() => {
     }
 
     draw();
+
+    app.querySelector("#arrangeBtn").addEventListener("click", () => {
+      Router.navigate(`#/arrange/${captureId}`);
+    });
 
     goBtn.addEventListener("click", async () => {
       goBtn.disabled = true;
@@ -270,7 +328,10 @@ const ScreenRestitch = (() => {
 
     // Leaving the screen with a photo open must not leave the overlay - or its
     // key listener - behind on whatever comes next.
-    return () => closeLightbox();
+    return () => {
+      if (ringTimer) clearInterval(ringTimer);
+      closeLightbox();
+    };
   }
 
   return { mount };
