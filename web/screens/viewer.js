@@ -420,6 +420,14 @@ const ScreenViewer = (() => {
         btn.classList.add("off");
       }
 
+      // Straight from the result to placing the photos by hand: the join that
+      // looks wrong is on screen, and this is where it gets fixed.
+      if (manifest.renderer === "sphere" && canEdit({ slug, id })) {
+        mk("\u2723", "Place the photos by hand", () => {
+          Router.navigate(`#/arrange/${manifest.capture_id}`);
+        });
+      }
+
       mk("−", "Zoom out", () => viewer.zoomOut());
       mk("+", "Zoom in", () => viewer.zoomIn());
       mk("↺", "Reset the view", () => viewer.resetView());
