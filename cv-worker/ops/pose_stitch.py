@@ -310,14 +310,15 @@ def _plan_scale(rotations, w, h, hfov_deg, budget_px):
     return scale
 
 
-def _try_ray_solve(images, sensor_rotations, rotations, shifts, hfov_deg):
+def _try_ray_solve(images, sensor_rotations, rotations, shifts, hfov_deg,
+                   hfov_trusted=False):
     """Swap in ray-solved rotations and field of view when they fit better.
 
     Never raises: a failure here keeps what refinement produced.
     """
     try:
         solver = RaySolver(images, sensor_rotations)
-        result = solver.solve(hfov_deg)
+        result = solver.solve(hfov_deg, hfov_trusted)
         if result is None:
             return rotations, shifts, hfov_deg
         solved, fov, stats = result
@@ -341,7 +342,8 @@ def _try_ray_solve(images, sensor_rotations, rotations, shifts, hfov_deg):
     return rotations, shifts, hfov_deg
 
 
-def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None):
+def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None,
+                      hfov_trusted=False):
     """Project photos onto a sphere using their recorded rotations.
 
     images: list of BGR arrays.
@@ -376,9 +378,18 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None):
         # setting which way is up and which way is north. The field of view is
         # measured on the way, and replaces the assumed one.
         sensor_rotations = rotations
+        # What the lens itself reported, kept aside: everything below is
+        # allowed to adjust the field of view, and when the EXIF has stated it
+        # outright there is nothing to adjust from a handful of pairs. A real
+        # capture whose lens said 78.1 had it re-measured as 76 from 3 pairs and
+        # then pulled to 80 by a plateau nine degrees wide.
+        trusted_hfov = hfov_deg if hfov_trusted else None
         if settings.refine_rotations and len(usable) >= 3:
             rotations, shifts, hfov_deg, _ = refine_poses(
-                [images[i] for i in usable], rotations, hfov_deg)
+                [images[i] for i in usable], rotations, hfov_deg,
+                measure_fov=not hfov_trusted)
+            if trusted_hfov is not None:
+                hfov_deg = trusted_hfov
 
         # Refinement trusts only confident matches, and on a plain floor or a
         # blank wall that is almost none - it then keeps the compass and the
@@ -388,7 +399,7 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None):
         if settings.ray_solve and len(usable) >= 3:
             rotations, shifts, hfov_deg = _try_ray_solve(
                 [images[i] for i in usable], sensor_rotations,
-                rotations, shifts, hfov_deg)
+                rotations, shifts, trusted_hfov or hfov_deg, hfov_trusted)
 
         # A photo locked by hand is placed exactly where it was put. It is used
         # where the photos cannot say - a blank wall, a window of repeating

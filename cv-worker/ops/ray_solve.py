@@ -47,16 +47,31 @@ MIN_INLIERS = 8
 # And they must be a real SHARE of the pair's matches, not a handful out of a
 # crowd. A window of repeating mullions matched 111 points between two photos
 # of which 5 fitted any rotation - one bay matched to the next, confidently and
-# wrongly. Judged on count alone those pairs look usable; judged on share they
-# are what they are. Good pairs on the same capture ran 30-50%.
-MIN_INLIER_SHARE = 0.25
+# wrongly.
+#
+# Measured across a real 32-photo corridor capture, honest pairs ran a median
+# share of 0.24 and a quarter of them below 0.16, so the 0.25 this started at
+# threw away half the evidence and left the sphere on its drifting sensor. The
+# junk pairs sat at 0.02 to 0.05, well clear of either figure.
+MIN_INLIER_SHARE = 0.15
+
+# ...unless there are simply a lot of agreeing points. One real pair on that
+# capture had 51 of them at a share of 0.16 and agreed with the sensor's tilt
+# to 0.6 degrees: plainly good, and a share test alone would have refused it.
+STRONG_INLIERS = 25
 
 # What "solved" has to mean in absolute terms, in pixels at the working width.
 # Comparing a candidate only against what came before rewards whichever fits
 # the noise best: on synthetic photos whose rotations were exact, a solve that
 # moved cameras 55 degrees still "improved" on the truth, because both were
 # scored against the same false matches.
-MAX_SOLVED_RESIDUAL_PX = 8.0
+#
+# Loose rather than tight, at about a degree: this is a median over every pair
+# used, so the more evidence a solve takes in the higher it reads, and 8 px
+# refused a good 32-photo solve at 9 px for having listened to more pairs. The
+# guards that actually catch a solve fitting noise are the spread and the mean
+# correction below.
+MAX_SOLVED_RESIDUAL_PX = 15.0
 
 # The most the average camera may move. A capture's sensor is wrong in places,
 # not everywhere: a mean correction beyond this is a solve fitting noise.
@@ -109,6 +124,11 @@ MAX_SPREAD_CHANGE = 0.15
 _VERTICAL = np.array([0.0, 1.0, 0.0])
 
 FOV_RANGE_DEG = (50, 90)
+
+# How far the photographs may pull a field of view that the lens itself
+# reported. Enough for a lens whose EXIF rounds, or a capture whose photos were
+# cropped; not enough to wander across a plateau.
+TRUSTED_FOV_SLACK_DEG = 4.0
 
 
 def _rays(pts, K_inv):
@@ -195,12 +215,22 @@ class RaySolver:
             inl = np.linalg.norm(_project(ra, R, K) - pb, axis=1) < INLIER_PX
             if best is None or inl.sum() > best.sum():
                 best = inl
-        if best.sum() < MIN_INLIERS or best.mean() < MIN_INLIER_SHARE:
+        if best.sum() < MIN_INLIERS:
+            return None, best
+        if best.mean() < MIN_INLIER_SHARE and best.sum() < STRONG_INLIERS:
             return None, best
         return _kabsch(ra[best], rb[best]), best
 
-    def _measure_fov(self, hint):
-        """The field of view at which the most matched rays fit pure rotations."""
+    def _measure_fov(self, hint, trusted=False):
+        """The field of view at which the most matched rays fit pure rotations.
+
+        `trusted` means the hint came from the lens itself - the EXIF 35mm
+        equivalent - rather than from an assumption. The photographs cannot
+        always better it: on a real capture the count of agreeing rays was flat
+        from 73 to 82 degrees, no peak to find, and the answer picked out of
+        that plateau was 81 where the lens said 78. So a trusted hint is only
+        adjusted within a few degrees, by evidence, rather than replaced.
+        """
         # The busiest pairs decide it; scanning every pair at every angle costs
         # far more on a 30-photo sphere and changes the answer by nothing.
         ranked = sorted(self.pairs.values(), key=lambda p: -len(p[0]))[:12]
@@ -218,6 +248,9 @@ class RaySolver:
         # A flat curve is no measurement: keep what the caller believed.
         if fine[fov] < 40 or fine[fov] < 1.15 * min(coarse.values()):
             return float(hint), fine[fov]
+        if trusted:
+            fov = max(hint - TRUSTED_FOV_SLACK_DEG,
+                      min(hint + TRUSTED_FOV_SLACK_DEG, float(fov)))
         return float(fov), fine[fov]
 
     def error(self, rotations, hfov_deg, shifts=None, keys=None):
@@ -252,11 +285,11 @@ class RaySolver:
             errs.append(float(np.percentile(np.linalg.norm(p - pb[front], axis=1), 30)))
         return float(np.median(errs)) if errs else float("inf")
 
-    def solve(self, hfov_hint):
+    def solve(self, hfov_hint, trusted=False):
         """(rotations, hfov_deg, stats), or None when the photos say too little."""
         if len(self.pairs) < max(2, self.n // 3):
             return None
-        fov, fov_score = self._measure_fov(hfov_hint)
+        fov, fov_score = self._measure_fov(hfov_hint, trusted)
         K = _K(self.w, self.h, fov)
 
         rel = {}

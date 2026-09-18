@@ -26,6 +26,7 @@ from ops.normalize import (
     centroid,
     decode_with_exif_rotation,
     encode_jpeg,
+    exif_hfov,
     normalize_color,
     resize_to_width,
 )
@@ -34,8 +35,9 @@ from ops.tiles import cut_tiles, face_size_for, levels_for
 from ops.feature_stitch import stitch_with_features
 from ops.finish import MIN_SPHERE_COVERAGE, finish_panorama
 from ops.coverage import describe_leftovers, sphere_coverage
-from ops.pose_stitch import (quaternion_from_heading, quaternion_to_matrix,
-                             rotation_from_view, stitch_with_poses)
+from ops.pose_stitch import (DEFAULT_HFOV_DEG, quaternion_from_heading,
+                             quaternion_to_matrix, rotation_from_view,
+                             stitch_with_poses)
 from ops.xmp import add_photosphere_metadata
 
 try:
@@ -853,6 +855,10 @@ def handle_finalize_job(mc, job, attempt=1):
     # every subsequent rotation to the wrong photo.
     images = []
     loaded = []
+    # The lens's own field of view, from the first photo that reports one. The
+    # photographs cannot always measure it - on a real capture the evidence was
+    # flat across nine degrees - and the phone simply knows.
+    lens_hfov = [None]
     for f in ring:
         try:
             # Stitch from the ORIGINAL upload, not the processed frame.
@@ -877,6 +883,8 @@ def handle_finalize_job(mc, job, attempt=1):
             if original:
                 try:
                     raw = get_object_bytes(mc, settings.bucket_private, original)
+                    if lens_hfov[0] is None:
+                        lens_hfov[0] = exif_hfov(raw)
                     # EXIF rotation is baked into the processed frame but not
                     # into the original, so it has to be applied here or a
                     # portrait photo arrives on its side.
@@ -955,8 +963,14 @@ def handle_finalize_job(mc, job, attempt=1):
             for f, q in zip(ring, quats)])
         # Photos placed by hand are anchors: the build puts them exactly where
         # they were put, and no solve may move them.
+        if lens_hfov[0]:
+            log.info("%s capture=%s: the lens reports a %.0f degree field of view",
+                     PREFIX, capture_id, lens_hfov[0])
         ok, pano, reason, geom = stitch_with_poses(
-            images, quats, locked=[_manual_rotation(f) for f in ring])
+            images, quats,
+            hfov_deg=lens_hfov[0] or DEFAULT_HFOV_DEG,
+            hfov_trusted=lens_hfov[0] is not None,
+            locked=[_manual_rotation(f) for f in ring])
         if ok and pano is not None:
             src_h, src_w = images[0].shape[:2]
             coverage = sphere_coverage(

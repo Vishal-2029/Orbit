@@ -3,6 +3,7 @@ centroid alignment for spin mode, and JPEG/thumb encoding.
 """
 import io
 import logging
+import math
 
 import cv2
 import numpy as np
@@ -19,6 +20,46 @@ def decode_with_exif_rotation(raw_bytes: bytes) -> np.ndarray:
         arr = np.array(im)  # RGB
     bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
     return bgr
+
+
+# The diagonal of a 35mm frame, which is what "35mm equivalent focal length"
+# is measured against.
+_FILM_DIAGONAL_MM = 43.27
+
+
+def exif_hfov(raw_bytes):
+    """The photo's horizontal field of view in degrees, from its EXIF, or None.
+
+    A phone records the 35mm-equivalent focal length of the lens it actually
+    used, which settles in one number what the photographs themselves can only
+    guess at: on a real capture the field of view measured from overlaps was
+    flat from 73 to 82 degrees - no peak to find - while the EXIF said 78.1, and
+    the same lens on another capture agreed.
+
+    Horizontal means across the SHORT side for an upright photo, because that is
+    what intrinsics() calls width.
+    """
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(raw_bytes)) as im:
+            exif = im.getexif()
+            w, h = im.size
+            focal35 = None
+            try:
+                focal35 = exif.get_ifd(0x8769).get(0xA405)
+            except Exception:
+                focal35 = exif.get(0xA405)
+        if not focal35 or not w or not h:
+            return None
+        focal35 = float(focal35)
+        if focal35 <= 1:
+            return None
+        short = min(w, h)
+        sensor = _FILM_DIAGONAL_MM * short / math.hypot(w, h)
+        return math.degrees(2.0 * math.atan(sensor / 2.0 / focal35))
+    except Exception:
+        return None
 
 
 def resize_to_width(img: np.ndarray, target_width: int) -> np.ndarray:
