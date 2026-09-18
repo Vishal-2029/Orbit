@@ -158,6 +158,10 @@ const ScreenProcessing = (() => {
           if (idx != null && idx >= 0 && idx < tickState.length) tickState[idx] = "failed";
           renderTicks();
           logLine("frame failed: " + (ev.message || "unknown reason"));
+        } else if (ev.type === "ring") {
+          // A ring stitched on its own, while the capture was still being shot.
+          const r = PhotoNames.ring({ slot_id: ev.ring || "" });
+          logLine(`${r.label}: ${ev.message || ev.status}`);
         } else if (ev.type === "ready") {
           closedCleanly = true;
           logLine(ev.message || "ready");

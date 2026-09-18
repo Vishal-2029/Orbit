@@ -204,6 +204,26 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 }
 .row-toggle:disabled { opacity: .45; cursor: default; }
 
+/* A ring's heading on the restitch screen. */
+.ring-head {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 18px 2px 8px;
+}
+.ring-head:first-child { margin-top: 4px; }
+.ring-name { font-weight: 700; }
+.ring-hint { color: var(--muted); font-size: .82rem; }
+.ring-count { margin-left: auto; color: var(--muted); font-size: .82rem; }
+
+/* A ring's own stitch, shown above its photos on the restitch screen. */
+.ring-preview {
+  background: var(--panel); border-radius: 12px; padding: 8px; margin-bottom: 8px;
+}
+.ring-preview img {
+  display: block; width: 100%; border-radius: 8px;
+  max-height: 140px; object-fit: cover; object-position: center;
+}
+.ring-preview .muted { font-size: .8rem; margin-top: 6px; }
+
 /* Full-size photo, for deciding whether one is blurred or of the wrong room -
    which a 56px square cannot answer. */
 .lightbox {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -61,6 +62,8 @@ func NewServer(svc *service.Capture, hub *realtime.Hub, store storage.Store, cfg
 	v1.Post("/captures/:id/photos", s.uploadPhoto)
 	v1.Post("/captures/:id/process", s.process)
 	v1.Get("/captures/:id/frames", s.listFrames)
+	v1.Get("/captures/:id/rings", s.listRings)
+	v1.Get("/captures/:id/image/rings/:ring", s.serveRingImage)
 	v1.Patch("/captures/:id/frames/:idx", s.patchFrame)
 	v1.Get("/captures/:id/manifest", s.getManifest)
 	v1.Get("/captures/:id/image/panorama", s.servePanorama)
@@ -80,6 +83,7 @@ func NewServer(svc *service.Capture, hub *realtime.Hub, store storage.Store, cfg
 	w.Post("/captures/:id/frames/:frameId/done", s.workerFrameDone)
 	w.Post("/captures/:id/frames/:frameId/failed", s.workerFrameFailed)
 	w.Post("/captures/:id/finalize", s.workerFinalize)
+	w.Post("/captures/:id/rings/:ring/finalize", s.workerRingFinalize)
 
 	// Public share page data by slug.
 	app.Get("/s/:slug/manifest", s.manifestBySlug)
@@ -272,11 +276,82 @@ func (s *Server) uploadPhoto(c *fiber.Ctx) error {
 }
 
 func (s *Server) process(c *fiber.Ctx) error {
+	// With a ring, this builds just that ring - the capture screen asks for one
+	// as soon as its last photo lands, while the rest is still being shot.
+	// Without, it builds the whole capture, which is what finishing does.
+	var body struct {
+		Ring string `json:"ring"`
+	}
+	if len(c.Body()) > 0 {
+		_ = c.BodyParser(&body)
+	}
+	if body.Ring != "" {
+		ring, err := s.svc.ProcessRing(c.Context(), c.Params("id"), body.Ring)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return c.JSON(fiber.Map{"ring": ring})
+	}
 	cap, err := s.svc.Process(c.Context(), c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	return c.JSON(fiber.Map{"capture": cap})
+}
+
+// ringParam is the ring from the path, decoded.
+//
+// A ring id carries a sign - "r+0", "r-45" - and a client has to percent-encode
+// the plus or it means a space. Fiber hands the parameter back exactly as it
+// arrived, so without this the ring is stored as "r%2B0" and its preview is
+// looked up under a key nothing wrote.
+func ringParam(c *fiber.Ctx) string {
+	raw := c.Params("ring")
+	if dec, err := url.PathUnescape(raw); err == nil {
+		return dec
+	}
+	return raw
+}
+
+func (s *Server) listRings(c *fiber.Ctx) error {
+	rings, err := s.svc.Rings(c.Context(), c.Params("id"))
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"rings": rings})
+}
+
+func (s *Server) serveRingImage(c *fiber.Ctx) error {
+	return s.streamObject(c, s.cfg.BucketPublic,
+		storage.RingKey(c.Params("id"), ringParam(c)))
+}
+
+func (s *Server) workerRingFinalize(c *fiber.Ctx) error {
+	// The worker reports a storage KEY; CaptureRing.Panorama carries the URL
+	// built from it on the way out. Same picture, different things, so they do
+	// not share a JSON name - which they silently did, and the key was dropped.
+	var body struct {
+		Status      string `json:"status"`
+		PanoramaKey string `json:"panorama_key"`
+		Width       int    `json:"width"`
+		Height      int    `json:"height"`
+		PhotosUsed  int    `json:"photos_used"`
+		PhotosTotal int    `json:"photos_total"`
+		Note        string `json:"note"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
+	}
+	in := domain.CaptureRing{
+		Status: body.Status, Panorama: body.PanoramaKey,
+		Width: body.Width, Height: body.Height,
+		PhotosUsed: body.PhotosUsed, PhotosTotal: body.PhotosTotal, Note: body.Note,
+	}
+	ring, err := s.svc.FinalizeRing(c.Context(), c.Params("id"), ringParam(c), in)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"ring": ring})
 }
 
 func (s *Server) listFrames(c *fiber.Ctx) error {

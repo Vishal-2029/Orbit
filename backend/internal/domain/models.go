@@ -202,6 +202,26 @@ type TileLevel struct {
 	FallbackOnly bool `json:"fallbackOnly,omitempty"`
 }
 
+// CaptureRing is one ring of a capture, stitched on its own as it was shot.
+//
+// Ring is the slot prefix the capture flow planned the photos for - "r+0" for
+// the level ring, "r+45" tilted up, "r-45" tilted down, "up" and "down" for the
+// ceiling and floor - so the client groups by the same key it already shows.
+type CaptureRing struct {
+	CaptureID string `json:"capture_id"`
+	Ring      string `json:"ring"`
+	Status    string `json:"status"` // queued | processing | ready | partial | failed
+	// Panorama holds the storage key inside the server, and the URL built from
+	// it by the time a client sees it. Empty until the ring has stitched.
+	Panorama    string    `json:"panorama,omitempty"`
+	Width       int       `json:"width,omitempty"`
+	Height      int       `json:"height,omitempty"`
+	PhotosUsed  int       `json:"photos_used,omitempty"`
+	PhotosTotal int       `json:"photos_total,omitempty"`
+	Note        string    `json:"note,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // PhotoMarker is where one photo's centre landed on a finished sphere.
 //
 // Index is the frame index, the same one the restitch screen and the frames

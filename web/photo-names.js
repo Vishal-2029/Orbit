@@ -32,6 +32,50 @@ const PhotoNames = (() => {
     return `${facing(f.yaw)}${tilt(f.pitch)} · ${y}°, ${p >= 0 ? "+" : ""}${p}°`;
   }
 
+  // Which ring a photo belongs to, from the slot the capture flow planned it
+  // for. A sphere capture is shot as rings - level all the way round, then
+  // tilted up, then tilted down, then the ceiling and floor - and that is how
+  // people think about it, so it is how the screens group it.
+  //
+  // `order` is shooting order, not height: the level ring is shot first.
+  const RINGS = [
+    { id: "r+0", label: "Horizontal ring", hint: "level, all the way round", order: 1 },
+    { id: "r+45", label: "Top ring", hint: "tilted up", order: 2 },
+    { id: "r-45", label: "Bottom ring", hint: "tilted down", order: 3 },
+    { id: "up", label: "Ceiling", hint: "straight up", order: 4 },
+    { id: "down", label: "Floor", hint: "straight down", order: 5 },
+  ];
+
+  /** The ring a frame belongs to: { id, label, hint, order }. */
+  function ring(f) {
+    const slot = String((f && f.slot_id) || "");
+    const id = slot.replace(/_\d+$/, "");
+    const known = RINGS.find((r) => r.id === id);
+    if (known) return known;
+    // A capture shot at some other tilt, or with no slot at all. Named from
+    // the angle rather than dropped, so nothing goes missing from the screen.
+    const m = id.match(/^r([+-])(\d+)$/);
+    if (m) {
+      const deg = Number(m[2]);
+      return { id, order: 6,
+               label: deg === 0 ? "Horizontal ring" : `${m[1] === "+" ? "Top" : "Bottom"} ring`,
+               hint: deg === 0 ? "level" : `tilted ${m[1] === "+" ? "up" : "down"} ${deg}\u00b0` };
+    }
+    return { id: id || "other", label: "Other photos", hint: "", order: 7 };
+  }
+
+  /** A capture's frames as [{ ring, frames }], in shooting order. */
+  function byRing(frames) {
+    const groups = new Map();
+    (frames || []).forEach((f) => {
+      const r = ring(f);
+      if (!groups.has(r.id)) groups.set(r.id, { ring: r, frames: [] });
+      groups.get(r.id).frames.push(f);
+    });
+    return Array.from(groups.values())
+      .sort((a, b) => a.ring.order - b.ring.order || a.ring.id.localeCompare(b.ring.id));
+  }
+
   /** Map of frame index -> photo number, from the capture's full frame list. */
   function numbers(frames) {
     const map = {};
@@ -40,5 +84,5 @@ const PhotoNames = (() => {
     return map;
   }
 
-  return { facing, tilt, position, numbers };
+  return { facing, tilt, position, numbers, ring, byRing, RINGS };
 })();

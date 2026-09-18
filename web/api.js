@@ -82,6 +82,14 @@ const OrbitAPI = (() => {
     process(id) {
       return req("POST", `/api/v1/captures/${id}/process`);
     },
+    // Build ONE ring, while the rest of the capture is still being shot.
+    // Returns that ring's row, not the capture: the 360 does not exist yet.
+    processRing(id, ring) {
+      return req("POST", `/api/v1/captures/${id}/process`, { ring });
+    },
+    listRings(id) {
+      return req("GET", `/api/v1/captures/${id}/rings`);
+    },
     listFrames(id) {
       return req("GET", `/api/v1/captures/${id}/frames`);
     },

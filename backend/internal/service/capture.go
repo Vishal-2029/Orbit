@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/url"
 	"strings"
 
 	"github.com/vishal/orbit/backend/internal/config"
@@ -257,6 +258,114 @@ type framePayload struct {
 
 // Process validates that enough photos landed, then queues one job per frame
 // plus a finalize job. Returns an error the user can act on if photos are short.
+// RingOf is the ring a frame belongs to: its slot without the position on the
+// ring, so "r+45_080" is "r+45", and "up" is its own ring. The web client
+// groups by exactly this, so both ends agree without a second field to keep in
+// step.
+func RingOf(f domain.Frame) string {
+	slot := f.SlotID
+	if i := strings.LastIndex(slot, "_"); i > 0 {
+		return slot[:i]
+	}
+	return slot
+}
+
+// ProcessRing builds ONE ring of a capture, while the rest is still being shot.
+//
+// A ring that is finished is a ring that can be built, so the capture screen
+// asks for it as soon as its last photo lands. It deliberately does not touch
+// the capture's own status, manifest or frame count: those describe the whole
+// 360, which does not exist yet, and a ring preview must never make a
+// half-shot capture look finished.
+func (s *Capture) ProcessRing(ctx context.Context, captureID, ring string) (*domain.CaptureRing, error) {
+	c, err := s.repo.GetCapture(ctx, captureID)
+	if err != nil {
+		return nil, err
+	}
+	frames, err := s.repo.ListFrames(ctx, captureID)
+	if err != nil {
+		return nil, err
+	}
+	mine := make([]domain.Frame, 0, len(frames))
+	for _, f := range frames {
+		if RingOf(f) == ring && !f.Excluded {
+			mine = append(mine, f)
+		}
+	}
+	if len(mine) == 0 {
+		return nil, fmt.Errorf("no photos in ring %q to build from", ring)
+	}
+
+	row := &domain.CaptureRing{CaptureID: captureID, Ring: ring,
+		Status: domain.StatusQueued, PhotosTotal: len(mine)}
+	if err := s.repo.UpsertRing(ctx, row); err != nil {
+		return nil, err
+	}
+
+	for _, f := range mine {
+		p, err := json.Marshal(framePayload{
+			FrameID: f.ID, Index: f.Index, Yaw: f.Yaw, Pitch: f.Pitch,
+			OriginalKey: f.OriginalKey, Settings: c.Settings, Mode: c.Mode,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := s.q.Publish(ctx, queue.Job{
+			Type: queue.TypeProcessFrame, CaptureID: captureID, Payload: p,
+		}); err != nil {
+			return nil, fmt.Errorf("queue frame %d: %w", f.Index, err)
+		}
+	}
+	rp, err := json.Marshal(map[string]any{"ring": ring})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.q.Publish(ctx, queue.Job{
+		Type: queue.TypeFinalize, CaptureID: captureID, Payload: rp,
+	}); err != nil {
+		return nil, fmt.Errorf("queue ring finalize: %w", err)
+	}
+	s.hub.Publish(ctx, realtime.Event{
+		Type: "ring", CaptureID: captureID, Ring: ring, Status: domain.StatusQueued,
+		Message: fmt.Sprintf("%s: %d photos sent for stitching", ring, len(mine)),
+	})
+	return row, nil
+}
+
+// FinalizeRing records how one ring stitched, and tells the client live.
+func (s *Capture) FinalizeRing(ctx context.Context, captureID, ring string, in domain.CaptureRing) (*domain.CaptureRing, error) {
+	in.CaptureID, in.Ring = captureID, ring
+	if in.Status == "" {
+		in.Status = domain.StatusReady
+	}
+	if err := s.repo.UpsertRing(ctx, &in); err != nil {
+		return nil, err
+	}
+	msg := in.Note
+	if msg == "" {
+		msg = fmt.Sprintf("%s stitched from %d photos", ring, in.PhotosUsed)
+	}
+	s.hub.Publish(ctx, realtime.Event{
+		Type: "ring", CaptureID: captureID, Ring: ring, Status: in.Status, Message: msg,
+	})
+	return &in, nil
+}
+
+func (s *Capture) Rings(ctx context.Context, captureID string) ([]domain.CaptureRing, error) {
+	rings, err := s.repo.ListRings(ctx, captureID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rings {
+		if rings[i].Panorama != "" {
+			rings[i].Panorama = fmt.Sprintf("%s/api/v1/captures/%s/image/rings/%s?v=%d",
+				s.cfg.PublicBaseURL, captureID, url.PathEscape(rings[i].Ring),
+				rings[i].UpdatedAt.Unix())
+		}
+	}
+	return rings, nil
+}
+
 func (s *Capture) Process(ctx context.Context, captureID string) (*domain.Capture, error) {
 	c, err := s.repo.GetCapture(ctx, captureID)
 	if err != nil {

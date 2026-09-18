@@ -55,6 +55,7 @@ const ScreenCapture = (() => {
     const state = {
       slots: (plan.slots || []).map((s) => ({ ...s })),
       shots: new Map(),      // slot id -> { blob, url, index, yaw, pitch, quat }
+      ringsSent: new Set(),  // rings already sent for stitching
       stream: null,
       tilt: null,
     };
@@ -989,6 +990,41 @@ const ScreenCapture = (() => {
       return grabVideoFrame();
     }
 
+    // A finished ring is sent to be stitched straight away, while the next one
+    // is still being shot.
+    //
+    // Its photos have to have LANDED first, not merely been taken: the shutter
+    // returns before the upload does, and a ring whose last photo is still in
+    // flight would be built without it. Sent once per ring - re-taking a photo
+    // in a finished ring does not re-send it, because the final build uses
+    // every photo anyway and this is only a preview.
+    async function maybeStitchRing(slot) {
+      const ring = PhotoNames.ring({ slot_id: slot.id });
+      if (!ring.id || state.ringsSent.has(ring.id)) return;
+      const inRing = state.slots.filter((s) => PhotoNames.ring({ slot_id: s.id }).id === ring.id);
+      const shots = inRing.map((s) => state.shots.get(s.id)).filter(Boolean);
+      if (shots.length < inRing.length) return;
+
+      state.ringsSent.add(ring.id);
+      try {
+        await Promise.all(shots.map((sh) => sh.upload).filter(Boolean));
+        await OrbitAPI.processRing(captureId, ring.id);
+        say(`${ring.label} sent for stitching \u2014 keep shooting`);
+      } catch (e) {
+        // A preview is a bonus, never the capture. Losing one costs nothing:
+        // the final build still uses every photo.
+        state.ringsSent.delete(ring.id);
+        console.log("[orbit] ring stitch not started:", e.message);
+      }
+    }
+
+    // A short note that does not shout: the camera screen is busy enough.
+    function say(text) {
+      errBox.classList.remove("warn");
+      errBox.textContent = text;
+      setTimeout(() => { if (errBox.textContent === text) errBox.textContent = ""; }, 4000);
+    }
+
     async function takeShot(slot) {
       if (firing) return;
       firing = true;
@@ -1021,6 +1057,7 @@ const ScreenCapture = (() => {
         errBox.classList.remove("warn");
         addThumb(slot, shot); updateFinishState(); updateGhost(); renderStatus();
         shot.upload = uploadShot(slot, shot);
+        maybeStitchRing(slot);
       } catch (e) {
         errBox.classList.remove("warn");
         errBox.textContent = "Could not take that photo: " + e.message;

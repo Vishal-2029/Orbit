@@ -156,6 +156,11 @@ def report_frame_failed(capture_id, frame_id, index, reason):
               {"index": index, "reason": reason})
 
 
+def report_ring(capture_id, ring, body):
+    from urllib.parse import quote
+    post_json(f"/api/v1/internal/captures/{capture_id}/rings/{quote(ring, safe='')}/finalize", body)
+
+
 def report_finalize(capture_id, body):
     post_json(f"/api/v1/internal/captures/{capture_id}/finalize", body)
 
@@ -174,6 +179,10 @@ def processed_key(capture_id, idx):
 
 def thumb_key(capture_id, idx):
     return f"captures/{capture_id}/thumb/{idx:03d}.jpg"
+
+
+def ring_key(capture_id, ring):
+    return f"captures/{capture_id}/rings/{ring}.jpg"
 
 
 def panorama_key(capture_id):
@@ -651,8 +660,127 @@ def _finish_and_publish(mc, capture_id, pano, geom, ring, used, total,
     return True
 
 
+def ring_of(frame):
+    """The ring a frame belongs to: its slot without the position on the ring.
+
+    Matches service.RingOf on the API and PhotoNames.ring in the client, so all
+    three group a capture the same way.
+    """
+    slot = frame.get("slot_id") or ""
+    return slot.rsplit("_", 1)[0] if "_" in slot else slot
+
+
+def handle_ring_job(mc, capture_id, ring):
+    """Stitch ONE ring, while the rest of the capture is still being shot.
+
+    A ring that is finished can be built, and building it then costs nothing at
+    the end and shows the photographer how that ring came out while they can
+    still re-shoot it. It is a preview, deliberately separate from the capture's
+    own manifest: the 360 does not exist yet.
+    """
+    log.info("%s ring job capture=%s ring=%s: waiting for its photos", PREFIX, capture_id, ring)
+    deadline = time.time() + settings.finalize_timeout_seconds
+    mine = []
+    while time.time() < deadline:
+        try:
+            frames = get_json(f"/api/v1/captures/{capture_id}/frames").get("frames", [])
+        except Exception as e:
+            log.warning("%s ring %s: could not list frames (%s)", PREFIX, ring, e)
+            time.sleep(settings.finalize_poll_interval)
+            continue
+        mine = [f for f in frames if ring_of(f) == ring and not f.get("excluded")]
+        if mine and all(f.get("status") in ("done", "failed") for f in mine):
+            break
+        time.sleep(settings.finalize_poll_interval)
+
+    done = [f for f in mine if f.get("status") == "done"]
+    if len(done) < 2:
+        reason = "This ring does not have enough finished photos to build yet."
+        log.warning("%s ring %s: %s", PREFIX, ring, reason)
+        report_ring(capture_id, ring, {"status": "failed", "photos_total": len(mine),
+                                       "note": reason})
+        return
+
+    images, loaded = [], []
+    for f in sort_ring_by_yaw(done):
+        try:
+            raw = get_object_bytes(mc, settings.bucket_private, f["original_key"])
+            img = decode_with_exif_rotation(raw)
+            if img is not None and img.shape[1] > settings.target_width_default:
+                img = resize_to_width(img, settings.target_width_default)
+            del raw
+        except Exception as e:
+            log.warning("%s ring %s: could not load photo %s (%s)",
+                        PREFIX, ring, f.get("index"), e)
+            continue
+        images.append(img)
+        loaded.append(f)
+
+    if len(images) < 2:
+        report_ring(capture_id, ring, {"status": "failed", "photos_total": len(mine),
+                                       "note": "This ring's photos could not be read."})
+        return
+
+    quats = [_pose_of(f) for f in loaded]
+    ok, pano, reason, geom = (False, None, "No photo carries camera rotation data.", None)
+    if sum(1 for q in quats if q is not None) >= len(quats) * 0.8:
+        ok, pano, reason, geom = stitch_with_poses(images, quats)
+    if not ok or pano is None:
+        ok, pano, reason, geom, _ = stitch_with_features(images)
+    _release(images)
+    if not ok or pano is None:
+        log.warning("%s ring %s did not stitch: %s", PREFIX, ring, reason)
+        report_ring(capture_id, ring, {"status": "failed", "photos_total": len(mine),
+                                       "photos_used": 0, "note": reason})
+        return
+
+    # A ring is not a sphere and must not be shaped like one: it is one band of
+    # the world, and padding it to 2:1 would stretch that band over the poles.
+    try:
+        pano, info = finish_panorama(
+            pano,
+            circumference_px=geom.circumference_px if geom else None,
+            equator_y=geom.equator_y if geom else None,
+            coverage=geom.coverage if geom else None,
+            equirect=False)
+        note = ("covers %.0f degrees" % info.span_deg) if info else ""
+    except Exception as e:
+        log.warning("%s ring %s: clean-up failed (%s); using the raw stitch", PREFIX, ring, e)
+        note = ""
+
+    h, w = pano.shape[:2]
+    try:
+        put_object_bytes(mc, settings.bucket_public, ring_key(capture_id, ring),
+                         encode_jpeg(pano, settings.jpeg_quality))
+    except Exception as e:
+        log.error("%s ring %s: could not store the preview (%s)", PREFIX, ring, e)
+        report_ring(capture_id, ring, {"status": "failed", "photos_total": len(mine),
+                                       "note": "The ring stitched but could not be saved."})
+        return
+
+    log.info("%s ring %s stitched %d of %d photos into %dx%d",
+             PREFIX, ring, len(loaded), len(mine), w, h)
+    report_ring(capture_id, ring, {
+        "status": "ready", "panorama_key": ring_key(capture_id, ring),
+        "width": w, "height": h,
+        "photos_used": len(loaded), "photos_total": len(mine),
+        "note": note,
+    })
+
+
 def handle_finalize_job(mc, job, attempt=1):
     capture_id = job["capture_id"]
+
+    # A finalize job carrying a ring builds only that ring, as a preview while
+    # the capture is still being shot.
+    payload = job.get("payload") or {}
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    if isinstance(payload, dict) and payload.get("ring"):
+        return handle_ring_job(mc, capture_id, payload["ring"])
     log.info("%s finalize job capture=%s: waiting for frames", PREFIX, capture_id)
 
     cap, frames = wait_for_frames(capture_id)

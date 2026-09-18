@@ -126,6 +126,7 @@ func ProcessedKey(captureID string, idx int) string {
 func ThumbKey(captureID string, idx int) string {
 	return fmt.Sprintf("captures/%s/thumb/%03d.jpg", captureID, idx)
 }
+
 // TileKey is one cube tile of a panorama.
 //
 // The path is what the viewer's URL template expands to, so the two have to
@@ -134,6 +135,12 @@ func ThumbKey(captureID string, idx int) string {
 // is scrambled, which is a slow thing to notice.
 func TileKey(captureID string, z int, face string, x, y int) string {
 	return fmt.Sprintf("captures/%s/tiles/%d/%s/%d/%d.jpg", captureID, z, face, y, x)
+}
+
+// RingKey is one ring's own panorama, stitched while the capture is still
+// being shot.
+func RingKey(captureID, ring string) string {
+	return fmt.Sprintf("captures/%s/rings/%s.jpg", captureID, ring)
 }
 
 func PanoramaKey(captureID string) string {

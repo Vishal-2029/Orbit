@@ -325,6 +325,52 @@ func (r *Repo) ResetForReprocess(ctx context.Context, captureID string) error {
 //
 // Nothing is deleted: the row and its stored files are untouched, which is the
 // whole point - excluding is a guess you can take back, deleting is not.
+// --- rings ---
+
+// UpsertRing records how one ring of a capture stitched.
+func (r *Repo) UpsertRing(ctx context.Context, ring *domain.CaptureRing) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO capture_rings (capture_id, ring, status, panorama_key, width, height,
+		                           photos_used, photos_total, note, updated_at)
+		VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULLIF($9,''),now())
+		ON CONFLICT (capture_id, ring) DO UPDATE SET
+			status=EXCLUDED.status, panorama_key=EXCLUDED.panorama_key,
+			width=EXCLUDED.width, height=EXCLUDED.height,
+			photos_used=EXCLUDED.photos_used, photos_total=EXCLUDED.photos_total,
+			note=EXCLUDED.note, updated_at=now()`,
+		ring.CaptureID, ring.Ring, ring.Status, ring.Panorama, ring.Width, ring.Height,
+		ring.PhotosUsed, ring.PhotosTotal, ring.Note)
+	if err != nil && isBadUUID(err) {
+		return ErrNotFound
+	}
+	return err
+}
+
+func (r *Repo) ListRings(ctx context.Context, captureID string) ([]domain.CaptureRing, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT capture_id, ring, status, COALESCE(panorama_key,''), COALESCE(width,0),
+		       COALESCE(height,0), COALESCE(photos_used,0), COALESCE(photos_total,0),
+		       COALESCE(note,''), updated_at
+		FROM capture_rings WHERE capture_id=$1 ORDER BY ring`, captureID)
+	if err != nil {
+		if isBadUUID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.CaptureRing{}
+	for rows.Next() {
+		var g domain.CaptureRing
+		if err := rows.Scan(&g.CaptureID, &g.Ring, &g.Status, &g.Panorama, &g.Width,
+			&g.Height, &g.PhotosUsed, &g.PhotosTotal, &g.Note, &g.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repo) SetFrameExcluded(ctx context.Context, captureID string, idx int, excluded bool) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE frames SET excluded=$3 WHERE capture_id=$1 AND idx=$2`,

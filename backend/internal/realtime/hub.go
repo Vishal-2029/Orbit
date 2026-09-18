@@ -22,7 +22,11 @@ type Event struct {
 	Total     int    `json:"total,omitempty"`
 	Progress  int    `json:"progress"`
 	Message   string `json:"message,omitempty"`
-	Manifest  any    `json:"manifest,omitempty"`
+	// Ring names which ring an event is about, when it is about one: the
+	// processing screen shows "Horizontal ring stitched" as it happens rather
+	// than one silent wait for the whole capture.
+	Ring     string `json:"ring,omitempty"`
+	Manifest any    `json:"manifest,omitempty"`
 }
 
 type Hub struct {

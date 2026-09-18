@@ -132,13 +132,18 @@ const ScreenRestitch = (() => {
 
   async function mount(app, captureId) {
     let capture, frames;
+    const ringRows = {};    // ring id -> how that ring stitched on its own
     try {
-      const [cap, fr] = await Promise.all([
+      const [cap, fr, rg] = await Promise.all([
         OrbitAPI.getCapture(captureId),
         OrbitAPI.listFrames(captureId),
+        // A ring preview is a bonus - an older capture has none, and the
+        // screen has to work the same without them.
+        OrbitAPI.listRings(captureId).catch(() => ({ rings: [] })),
       ]);
       capture = cap.capture;
       frames = fr.frames || [];
+      (rg.rings || []).forEach((r) => { ringRows[r.ring] = r; });
     } catch (e) {
       app.innerHTML = `<div class="container"><div class="card"><h2>Not found</h2>
         <p class="muted">${escapeHtml(e.message)}</p>
@@ -182,7 +187,36 @@ const ScreenRestitch = (() => {
       countLine.textContent =
         `${capture.title} — ${used} of ${frames.length} photos will be used`;
       const ver = OrbitAPI.cacheStamp(capture);
-      rows.innerHTML = frames.map((f, i) => rowHtml(f, i + 1, ver)).join("");
+      // Grouped the way the capture was shot - level ring, then tilted up, then
+      // tilted down - because that is how a capture is judged: a whole ring is
+      // usually good or bad together, and "the top ring is soft" is a decision
+      // you can act on, where thirty numbered photos is not.
+      const num = PhotoNames.numbers(frames);
+      rows.innerHTML = PhotoNames.byRing(frames).map((g) => {
+        const used = g.frames.filter((f) => !f.excluded).length;
+        const row = ringRows[g.ring.id];
+        // The ring's own stitch, made while the capture was still being shot.
+        // Worth showing here because it answers the question this screen asks -
+        // is this ring any good? - without rebuilding the whole 360 first.
+        const preview = row && row.panorama ? `
+          <div class="ring-preview">
+            <img src="${row.panorama}" alt="${escapeHtml(g.ring.label)} stitched"
+                 loading="lazy" onerror="this.closest('.ring-preview').hidden=true">
+            <div class="muted">${escapeHtml(row.note || "")}</div>
+          </div>` : "";
+        const state = row
+          ? `<span class="badge ${row.status === "ready" ? "ready" : row.status === "failed" ? "failed" : "processing"}">${escapeHtml(row.status)}</span>`
+          : "";
+        return `
+          <div class="ring-head">
+            <span class="ring-name">${escapeHtml(g.ring.label)}</span>
+            <span class="ring-hint">${escapeHtml(g.ring.hint)}</span>
+            ${state}
+            <span class="ring-count">${used} of ${g.frames.length}</span>
+          </div>
+          ${preview}
+          ${g.frames.map((f) => rowHtml(f, num[f.index], ver)).join("")}`;
+      }).join("");
       // Every photo left out means nothing to build from, and the server says
       // so too - but saying it here keeps the button honest rather than
       // offering a click that can only fail.
