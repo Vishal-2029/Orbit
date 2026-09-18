@@ -77,9 +77,36 @@ const ScreenArrange = (() => {
       it.img = img;
     });
 
+    // Step by step, the way the capture was shot: the level ring first, then
+    // tilted up, then tilted down, then the ceiling and floor, and finally
+    // everything together. A ring is a decision on its own - its photos only
+    // have to agree with each other - and the last step is where the rings are
+    // checked against one another.
+    const stages = (() => {
+      const present = PhotoNames.byRing(frames).map((g) => g.ring);
+      const steps = present
+        .filter((r) => r.id !== "up" && r.id !== "down")
+        .map((r) => ({ id: r.id, label: r.label, hint: r.hint,
+                       match: (it) => it.ring.id === r.id }));
+      const poles = present.filter((r) => r.id === "up" || r.id === "down");
+      if (poles.length) {
+        steps.push({ id: "poles", label: "Ceiling and floor", hint: "straight up and down",
+                     match: (it) => it.ring.id === "up" || it.ring.id === "down" });
+      }
+      steps.push({ id: "all", label: "Everything together", hint: "check the rings against each other",
+                   match: () => true });
+      return steps;
+    })();
+
+    let stageAt = 0;
     let at = 0;                 // which photo is in focus - Photo 1 to start
     let context = "ring";       // what else to show: "ring" | "all" | "none"
+    let view = "map";           // "map" (flat) or "model" (the frames in 3D)
+    let model = null;
     let dragging = null;
+
+    const stage = () => stages[stageAt];
+    const inStage = () => items.filter((it) => stage().match(it));
 
     app.innerHTML = `
       <div class="screen">
@@ -111,8 +138,29 @@ const ScreenArrange = (() => {
             </label>
           </div>
 
+          <div class="card arrange-steps">
+            <div class="arrange-show">
+              <span class="muted">Step:</span>
+              <span id="stageChips"></span>
+              <span class="muted" id="stageDone" style="margin-left:auto"></span>
+            </div>
+            <div class="arrange-actions" style="margin-top:10px">
+              <button id="prevStage">Previous step</button>
+              <button id="nextStage">Next step ›</button>
+              <button id="lockStage">Lock this whole step</button>
+            </div>
+          </div>
+
+          <div class="arrange-show" style="margin-bottom:8px">
+            <span class="muted">View:</span>
+            <button class="chip" data-view="map">flat map</button>
+            <button class="chip" data-view="model">360 model</button>
+            <span class="muted" style="font-size:.82rem">the photo frames where they sit, seen from the middle</span>
+          </div>
+
           <div class="arrange-stage">
             <canvas id="map"></canvas>
+            <div id="model3d" class="arrange-3d" hidden></div>
           </div>
 
           <div class="card">
@@ -144,7 +192,8 @@ const ScreenArrange = (() => {
     const stepCount = app.querySelector("#stepCount");
     const rollRange = app.querySelector("#rollRange");
 
-    const current = () => items[at];
+    // `at` counts within the current step, so "3 / 12" is 3 of this ring.
+    const current = () => inStage()[Math.min(at, inStage().length - 1)] || items[0];
 
     function rectOf(it) {
       const w = canvas.width, h = canvas.height;
@@ -160,9 +209,11 @@ const ScreenArrange = (() => {
 
     function visible(it) {
       if (it === current()) return true;
+      if (context === "none") return false;
       if (context === "all") return true;
-      if (context === "ring") return it.ring.id === current().ring.id;
-      return false;
+      // "its ring" means this step's photos, which on the last step is all of
+      // them - that step exists precisely to check the rings against each other.
+      return stage().match(it);
     }
 
     function drawOne(it, focused) {
@@ -231,6 +282,7 @@ const ScreenArrange = (() => {
 
       items.forEach((it) => { if (it !== current() && visible(it)) drawOne(it, false); });
       drawOne(current(), true);
+      if (model) model.refresh();
 
       const locked = items.filter((i) => i.locked).length;
       counts.textContent = `${locked} of ${items.length} locked`;
@@ -241,22 +293,45 @@ const ScreenArrange = (() => {
           : `${locked} locked in place; the rest are placed by the build.`;
     }
 
+    function renderStages() {
+      const chips = app.querySelector("#stageChips");
+      chips.innerHTML = stages.map((st, i) => {
+        const mine = items.filter(st.match);
+        const done = mine.filter((m) => m.locked).length;
+        return `<button class="chip ${i === stageAt ? "on" : ""}" data-stage="${i}"
+                  title="${escapeHtml(st.hint || "")}">${i + 1}. ${escapeHtml(st.label)}${
+                  done === mine.length && mine.length ? " \u2713" : ""}</button>`;
+      }).join(" ");
+      chips.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => {
+        stageAt = Number(c.dataset.stage); at = 0; renderNow();
+      }));
+      const mine = inStage();
+      const done = mine.filter((m) => m.locked).length;
+      app.querySelector("#stageDone").textContent =
+        `${stage().label}: ${done} of ${mine.length} locked`;
+      app.querySelector("#prevStage").disabled = stageAt === 0;
+      app.querySelector("#nextStage").disabled = stageAt === stages.length - 1;
+    }
+
     function renderNow() {
       const it = current();
       nowName.textContent = `Photo ${it.n} — ${it.ring.label}`;
       nowPos.textContent =
         `${deg(wrapYaw(it.yaw))}° round, ${-deg(it.pitch)}° up/down` +
         (it.locked ? " · locked" : " · not locked");
-      stepCount.textContent = `${at + 1} / ${items.length}`;
+      stepCount.textContent = `${Math.min(at + 1, inStage().length)} / ${inStage().length}`;
       rollRange.value = deg(it.roll);
-      app.querySelectorAll(".chip").forEach((c) =>
+      app.querySelectorAll(".chip[data-show]").forEach((c) =>
         c.classList.toggle("on", c.dataset.show === context));
+      app.querySelectorAll(".chip[data-view]").forEach((c) =>
+        c.classList.toggle("on", c.dataset.view === view));
+      renderStages();
       renderStrip();
       draw();
     }
 
     function renderStrip() {
-      strip.innerHTML = items.map((it, i) => `
+      strip.innerHTML = inStage().map((it, i) => `
         <button class="film ${i === at ? "on" : ""} ${it.locked ? "locked" : ""}"
                 data-i="${i}" title="Photo ${it.n} — ${escapeHtml(it.ring.label)}">
           <img src="${OrbitAPI.imageURL(it.frame.capture_id, "thumb", it.frame.index)}"
@@ -332,8 +407,9 @@ const ScreenArrange = (() => {
     window.addEventListener("touchend", onUp);
 
     function step(d) {
-      at = Math.max(0, Math.min(items.length - 1, at + d));
+      at = Math.max(0, Math.min(inStage().length - 1, at + d));
       renderNow();
+      if (model && view === "model") model.lookAtItem(current());
     }
     app.querySelector("#prevBtn").addEventListener("click", () => step(-1));
     app.querySelector("#nextBtn").addEventListener("click", () => step(1));
@@ -362,8 +438,53 @@ const ScreenArrange = (() => {
       current().dirty = true;
       draw();
     });
-    app.querySelectorAll(".chip").forEach((c) => {
+    app.querySelectorAll(".chip[data-show]").forEach((c) => {
       c.addEventListener("click", () => { context = c.dataset.show; renderNow(); });
+    });
+
+    // Stepping through the rings: one ring is a decision on its own, and the
+    // last step is where they are checked against each other.
+    function goStage(i) {
+      stageAt = Math.max(0, Math.min(stages.length - 1, i));
+      at = 0;
+      renderNow();
+      if (model && view === "model") model.lookAtItem(current());
+    }
+    app.querySelector("#prevStage").addEventListener("click", () => goStage(stageAt - 1));
+    app.querySelector("#nextStage").addEventListener("click", () => goStage(stageAt + 1));
+    app.querySelector("#lockStage").addEventListener("click", () => {
+      inStage().forEach((it) => { it.locked = true; it.dirty = true; });
+      renderNow();
+    });
+
+    // The flat map and the 3D model are two views of the same arrangement, so
+    // switching between them changes nothing but how it is looked at.
+    const modelHost = app.querySelector("#model3d");
+    function setView(next) {
+      view = next;
+      canvas.hidden = view !== "map";
+      modelHost.hidden = view !== "model";
+      if (view === "model") {
+        if (!model) {
+          model = Arrange3D.create(modelHost, items, {
+            isVisible: (it) => visible(it),
+            isFocused: (it) => it === current(),
+            onSelect: (it) => {
+              const i = inStage().indexOf(it);
+              if (i >= 0) { at = i; renderNow(); }
+            },
+          });
+          if (!model) {
+            modelHost.innerHTML = `<div class="muted" style="padding:20px">
+              The 3D view needs WebGL, which this browser will not give us.</div>`;
+          }
+        }
+        if (model) { model.resize(); model.refresh(); model.lookAtItem(current()); }
+      }
+      renderNow();
+    }
+    app.querySelectorAll(".chip[data-view]").forEach((c) => {
+      c.addEventListener("click", () => setView(c.dataset.view));
     });
 
     // Arrow keys nudge by a degree, which a drag cannot do precisely.
@@ -406,12 +527,13 @@ const ScreenArrange = (() => {
       }
     });
 
-    const onResize = () => sizeCanvas();
+    const onResize = () => { sizeCanvas(); if (model) model.resize(); };
     window.addEventListener("resize", onResize);
     sizeCanvas();
     renderNow();
 
     return () => {
+      if (model) model.destroy();
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("touchend", onUp);

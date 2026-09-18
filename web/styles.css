@@ -228,6 +228,11 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 .arrange-step .muted { font-variant-numeric: tabular-nums; font-size: .85rem; }
 .arrange-roll { display: block; margin-top: 12px; font-size: .85rem; }
 
+/* The photo frames in 3D, seen from the middle. */
+.arrange-3d { width: 100%; }
+.arrange-3d canvas { display: block; width: 100%; height: auto; touch-action: none; cursor: grab; }
+.arrange-steps .chip { margin-bottom: 4px; }
+
 /* What to show behind the photo being placed. */
 .arrange-show { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .chip {
