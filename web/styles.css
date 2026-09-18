@@ -219,7 +219,43 @@ footer.hint { text-align: center; color: var(--muted); font-size: .8rem; padding
 .arrange-actions {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px;
 }
-.arrange-actions .muted { margin-left: auto; font-size: .85rem; }
+.arrange-now-head { display: flex; align-items: flex-start; gap: 12px; }
+.arrange-step { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.arrange-step button {
+  width: 38px; height: 38px; padding: 0; border-radius: 50%;
+  font-size: 20px; line-height: 1;
+}
+.arrange-step .muted { font-variant-numeric: tabular-nums; font-size: .85rem; }
+.arrange-roll { display: block; margin-top: 12px; font-size: .85rem; }
+
+/* What to show behind the photo being placed. */
+.arrange-show { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip {
+  padding: 5px 12px; border: 0; border-radius: 999px;
+  background: rgba(255,255,255,.07); color: #9aa4b2;
+  font-size: .82rem; line-height: 1; cursor: pointer;
+}
+.chip.on { background: rgba(96,141,255,.22); color: #9ab6ff; }
+
+/* Every photo in shot order, so the number on the map is findable. */
+.filmstrip {
+  display: flex; gap: 6px; overflow-x: auto; padding: 12px 2px 4px;
+  scrollbar-width: thin;
+}
+.film {
+  position: relative; flex: 0 0 auto; padding: 0; border: 2px solid transparent;
+  border-radius: 8px; background: var(--panel2); width: 62px; height: 62px;
+  overflow: hidden; cursor: pointer;
+}
+.film img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.film span {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  background: rgba(10,12,18,.8); color: #e7ecf3;
+  font-size: .72rem; line-height: 1.5; font-weight: 600;
+}
+.film.locked { border-color: var(--good); }
+.film.locked span { color: var(--good); }
+.film.on { border-color: #ffd84d; }
 .arrange-stage {
   background: #0b0d12; border: 1px solid #1f2530; border-radius: 12px;
   padding: 6px; margin-bottom: 12px; overflow: hidden;

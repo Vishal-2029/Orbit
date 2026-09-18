@@ -1,14 +1,15 @@
-// Place the photos by hand, and lock them there.
+// Place the photos by hand, one at a time, starting at Photo 1.
 //
 // A solver works from what photos have in common, and some photos have too
 // little to go on: a window of repeating mullions matches one bay to the next
 // and means it; a blank wall matches nothing at all. When the machine cannot
 // tell, the person looking at the picture can.
 //
-// So this shows every photo WHOLE - no seam cut, no blend, nothing hidden - at
-// the position it would actually be placed, on a flat map of the sphere. Drag
-// one where it belongs, click it to lock it there, and build. A locked photo is
-// an instruction: the build puts it exactly there and no solve may move it.
+// The first version of this screen drew all 32 photos at once. It was accurate
+// and unreadable - overlapping frames, labels colliding, no sense of where to
+// start. So the screen now works the way the capture did: one photo at a time,
+// in order, with its own ring behind it for context and the rest out of the
+// way. Photo 1, place it, lock it, next.
 //
 // The map is equirectangular: left to right is all the way round, top to bottom
 // is straight up to straight down. A photo is drawn as a rectangle of its own
@@ -16,16 +17,14 @@
 // towards the poles - the same distortion the finished 360 has, and the reason
 // the ceiling shot looks so wide.
 const ScreenArrange = (() => {
-  // Assumed width of one photo, in degrees, when nothing better is known.
-  // Only affects how big a photo is DRAWN here; the build measures the real
-  // field of view from the photos themselves.
+  // Assumed width of one photo, in degrees, when nothing better is known. Only
+  // affects how big a photo is DRAWN here; the build measures the real field of
+  // view from the photos themselves.
   const DEFAULT_HFOV = 63;
-
   const TAU = Math.PI * 2;
 
-  function wrapYaw(y) {
-    return ((y + Math.PI) % TAU + TAU) % TAU - Math.PI;
-  }
+  const wrapYaw = (y) => ((y + Math.PI) % TAU + TAU) % TAU - Math.PI;
+  const deg = (r) => Math.round(r * 180 / Math.PI);
 
   async function mount(app, captureId) {
     let capture, frames, manifest = null;
@@ -36,10 +35,9 @@ const ScreenArrange = (() => {
       ]);
       capture = cap.capture;
       frames = (fr.frames || []).filter((f) => !f.excluded);
-      // Where the last build put each photo. Absent on a capture that has
-      // never been built, and on one built before positions were recorded -
-      // the sensor's own angles stand in, which is what the build would have
-      // started from anyway.
+      // Where the last build put each photo. Absent on a capture never built,
+      // and on one built before positions were recorded - the sensor's own
+      // angles stand in, which is what the build would have started from.
       manifest = await OrbitAPI.getManifest(captureId).catch(() => null);
     } catch (e) {
       app.innerHTML = `<div class="container"><div class="card"><h2>Not found</h2>
@@ -50,31 +48,38 @@ const ScreenArrange = (() => {
 
     const placed = {};
     ((manifest && manifest.photos) || []).forEach((p) => { placed[p.index] = p; });
-
     const num = PhotoNames.numbers(frames);
-    // One entry per photo: where it sits now, whether it is pinned, and the
-    // picture itself. Positions are radians in the viewer's frame throughout,
-    // which is what the server stores and what the build reads back.
+
+    // In shot order, which is the order the numbers run in: Photo 1 first.
     const items = frames.map((f) => {
       const p = placed[f.index];
       const manual = f.manual_yaw != null && f.manual_pitch != null;
-      const yaw = manual ? f.manual_yaw
-        : p ? p.yaw : wrapYaw((Number(f.yaw) || 0) * Math.PI / 180);
-      const pitch = manual ? f.manual_pitch
-        : p ? p.pitch : -(Number(f.pitch) || 0) * Math.PI / 180;
-      const roll = manual ? (f.manual_roll || 0) : (p ? (p.roll || 0) : 0);
+      return {
+        frame: f,
+        n: num[f.index],
+        ring: PhotoNames.ring(f),
+        yaw: manual ? f.manual_yaw
+          : p ? p.yaw : wrapYaw((Number(f.yaw) || 0) * Math.PI / 180),
+        pitch: manual ? f.manual_pitch
+          : p ? p.pitch : -(Number(f.pitch) || 0) * Math.PI / 180,
+        roll: manual ? (f.manual_roll || 0) : (p ? (p.roll || 0) : 0),
+        locked: !!f.manual_locked,
+        dirty: false,
+        img: null,
+      };
+    }).sort((a, b) => a.n - b.n);
+
+    items.forEach((it) => {
       const img = new Image();
       img.crossOrigin = "anonymous";
-      img.src = OrbitAPI.imageURL(f.capture_id, "original", f.index);
+      img.src = OrbitAPI.imageURL(it.frame.capture_id, "original", it.frame.index);
       img.onload = draw;
-      return {
-        frame: f, n: num[f.index], img,
-        yaw, pitch, roll,
-        locked: !!f.manual_locked,
-        ring: PhotoNames.ring(f),
-        dirty: false,
-      };
+      it.img = img;
     });
+
+    let at = 0;                 // which photo is in focus - Photo 1 to start
+    let context = "ring";       // what else to show: "ring" | "all" | "none"
+    let dragging = null;
 
     app.innerHTML = `
       <div class="screen">
@@ -83,29 +88,44 @@ const ScreenArrange = (() => {
           <h1>Place the photos by hand</h1>
         </div>
         <div class="container arrange-wrap">
-          <div class="card">
-            <div class="muted" id="hint">
-              Every photo, whole and uncut, where it would be placed. Drag one to
-              move it; click it to lock it there. A locked photo is built exactly
-              where you put it — nothing will move it afterwards.
+
+          <div class="card arrange-now">
+            <div class="arrange-now-head">
+              <div>
+                <div id="nowName" style="font-weight:700;font-size:1.05rem"></div>
+                <div class="muted" id="nowPos" style="font-size:.85rem;margin-top:2px"></div>
+              </div>
+              <div class="arrange-step">
+                <button id="prevBtn" title="Previous photo">‹</button>
+                <span class="muted" id="stepCount"></span>
+                <button id="nextBtn" title="Next photo">›</button>
+              </div>
             </div>
             <div class="arrange-actions">
-              <button id="lockAll">Lock all</button>
-              <button id="unlockAll">Unlock all</button>
-              <button id="resetOne" disabled>Reset this photo</button>
-              <span class="muted" id="counts"></span>
+              <button class="primary" id="lockNext">Lock and next</button>
+              <button id="unlockBtn">Unlock</button>
+              <button id="resetBtn">Reset to where the build put it</button>
             </div>
-          </div>
-          <div class="arrange-stage">
-            <canvas id="map"></canvas>
-          </div>
-          <div class="card" id="selCard" hidden>
-            <div id="selName" style="font-weight:600"></div>
-            <div class="muted" id="selPos" style="margin:4px 0 10px"></div>
-            <label class="muted" style="font-size:.85rem">Turn it upright
+            <label class="muted arrange-roll">Turn it upright
               <input type="range" id="rollRange" min="-180" max="180" step="1" value="0">
             </label>
           </div>
+
+          <div class="arrange-stage">
+            <canvas id="map"></canvas>
+          </div>
+
+          <div class="card">
+            <div class="arrange-show">
+              <span class="muted">Show behind it:</span>
+              <button class="chip" data-show="ring">its ring</button>
+              <button class="chip" data-show="all">everything</button>
+              <button class="chip" data-show="none">nothing</button>
+              <span class="muted" id="counts" style="margin-left:auto"></span>
+            </div>
+            <div class="filmstrip" id="strip"></div>
+          </div>
+
           <div class="card">
             <button class="primary" id="goBtn" style="width:100%">Build with these positions</button>
             <div class="muted" id="goNote" style="margin-top:8px;font-size:.85rem"></div>
@@ -115,33 +135,75 @@ const ScreenArrange = (() => {
 
     const canvas = app.querySelector("#map");
     const ctx = canvas.getContext("2d");
+    const strip = app.querySelector("#strip");
     const counts = app.querySelector("#counts");
     const goBtn = app.querySelector("#goBtn");
     const goNote = app.querySelector("#goNote");
-    const selCard = app.querySelector("#selCard");
-    const selName = app.querySelector("#selName");
-    const selPos = app.querySelector("#selPos");
+    const nowName = app.querySelector("#nowName");
+    const nowPos = app.querySelector("#nowPos");
+    const stepCount = app.querySelector("#stepCount");
     const rollRange = app.querySelector("#rollRange");
-    const resetOne = app.querySelector("#resetOne");
 
-    let selected = null;
-    let dragging = null;
+    const current = () => items[at];
 
-    function sizeCanvas() {
-      const w = Math.min(canvas.parentElement.clientWidth, 1400);
-      canvas.width = Math.max(320, Math.floor(w));
-      canvas.height = Math.floor(canvas.width / 2);
-      draw();
-    }
-
-    // Where a photo sits on the map, and how big it is drawn.
     function rectOf(it) {
       const w = canvas.width, h = canvas.height;
-      const cx = ((it.yaw + Math.PI) / TAU) * w;
-      const cy = ((it.pitch + Math.PI / 2) / Math.PI) * h;
-      const ph = it.img.naturalHeight || 4, pw = it.img.naturalWidth || 3;
+      const ph = (it.img && it.img.naturalHeight) || 4;
+      const pw = (it.img && it.img.naturalWidth) || 3;
       const rw = (DEFAULT_HFOV / 360) * w;
-      return { cx, cy, rw, rh: rw * (ph / pw) };
+      return {
+        cx: ((wrapYaw(it.yaw) + Math.PI) / TAU) * w,
+        cy: ((it.pitch + Math.PI / 2) / Math.PI) * h,
+        rw, rh: rw * (ph / pw),
+      };
+    }
+
+    function visible(it) {
+      if (it === current()) return true;
+      if (context === "all") return true;
+      if (context === "ring") return it.ring.id === current().ring.id;
+      return false;
+    }
+
+    function drawOne(it, focused) {
+      const w = canvas.width;
+      const r = rectOf(it);
+      // Drawn at both ends when it straddles the seam, so a photo near the edge
+      // is never half missing.
+      [0, -w, w].forEach((off) => {
+        const cx = r.cx + off;
+        if (cx + r.rw / 2 < -20 || cx - r.rw / 2 > w + 20) return;
+        ctx.save();
+        ctx.translate(cx, r.cy);
+        ctx.rotate(it.roll);
+        ctx.globalAlpha = focused ? 1 : 0.22;
+        if (it.img && it.img.complete && it.img.naturalWidth) {
+          ctx.drawImage(it.img, -r.rw / 2, -r.rh / 2, r.rw, r.rh);
+        } else {
+          ctx.fillStyle = "#1e2430";
+          ctx.fillRect(-r.rw / 2, -r.rh / 2, r.rw, r.rh);
+        }
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = focused ? 3 : 1;
+        ctx.strokeStyle = focused ? "#ffd84d"
+          : it.locked ? "rgba(53,208,127,.55)" : "rgba(255,255,255,.25)";
+        ctx.strokeRect(-r.rw / 2, -r.rh / 2, r.rw, r.rh);
+        ctx.restore();
+
+        // Only the photo in focus is named on the map. Thirty-two labels at
+        // once was the unreadable part; the filmstrip below carries the rest.
+        if (focused) {
+          const label = `${it.locked ? "🔒 " : ""}Photo ${it.n}`;
+          ctx.font = "700 15px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          const tw = ctx.measureText(label).width + 14;
+          const ty = Math.max(12, r.cy - r.rh / 2 - 22);
+          ctx.fillStyle = "rgba(10,12,18,.85)";
+          ctx.fillRect(cx - tw / 2, ty, tw, 22);
+          ctx.fillStyle = it.locked ? "#35d07f" : "#ffd84d";
+          ctx.fillText(label, cx, ty + 16);
+        }
+      });
     }
 
     function draw() {
@@ -150,45 +212,25 @@ const ScreenArrange = (() => {
       ctx.fillStyle = "#0b0d12";
       ctx.fillRect(0, 0, w, h);
 
-      // The horizon and the quarter turns, so a position can be read off the
-      // map rather than guessed at.
+      // The horizon, the quarter turns, and which way each is - so a position
+      // can be read off the map rather than guessed at.
       ctx.strokeStyle = "rgba(255,255,255,.14)";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
       for (let k = 1; k < 4; k++) { ctx.moveTo((k / 4) * w, 0); ctx.lineTo((k / 4) * w, h); }
       ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,.35)";
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      [["behind", 0], ["left", 0.25], ["ahead", 0.5], ["right", 0.75], ["behind", 1]]
+        .forEach(([name, f]) => ctx.fillText(name, f * w, h / 2 - 8));
+      ctx.textAlign = "left";
+      ctx.fillText("straight up", 6, 14);
+      ctx.fillText("straight down", 6, h - 6);
 
-      items.forEach((it) => {
-        const r = rectOf(it);
-        // Drawn at both ends when it straddles the seam, so a photo near the
-        // edge is never half missing.
-        [0, -w, w].forEach((off) => {
-          const cx = r.cx + off;
-          if (cx + r.rw / 2 < 0 || cx - r.rw / 2 > w) return;
-          ctx.save();
-          ctx.translate(cx, r.cy);
-          ctx.rotate(it.roll);
-          ctx.globalAlpha = it.locked ? 1 : 0.72;
-          if (it.img.complete && it.img.naturalWidth) {
-            ctx.drawImage(it.img, -r.rw / 2, -r.rh / 2, r.rw, r.rh);
-          } else {
-            ctx.fillStyle = "#1e2430";
-            ctx.fillRect(-r.rw / 2, -r.rh / 2, r.rw, r.rh);
-          }
-          ctx.globalAlpha = 1;
-          ctx.lineWidth = it === selected ? 3 : 2;
-          ctx.strokeStyle = it === selected ? "#ffd84d"
-            : it.locked ? "#35d07f" : "rgba(255,255,255,.35)";
-          ctx.strokeRect(-r.rw / 2, -r.rh / 2, r.rw, r.rh);
-          ctx.restore();
-
-          ctx.fillStyle = it.locked ? "#35d07f" : "#e7ecf3";
-          ctx.font = "600 13px system-ui, sans-serif";
-          ctx.textAlign = "center";
-          ctx.fillText(`${it.locked ? "🔒 " : ""}Photo ${it.n}`, cx, r.cy - r.rh / 2 - 6);
-        });
-      });
+      items.forEach((it) => { if (it !== current() && visible(it)) drawOne(it, false); });
+      drawOne(current(), true);
 
       const locked = items.filter((i) => i.locked).length;
       counts.textContent = `${locked} of ${items.length} locked`;
@@ -199,37 +241,40 @@ const ScreenArrange = (() => {
           : `${locked} locked in place; the rest are placed by the build.`;
     }
 
-    function hit(x, y) {
-      const w = canvas.width;
-      for (let i = items.length - 1; i >= 0; i--) {
-        const it = items[i], r = rectOf(it);
-        for (const off of [0, -w, w]) {
-          const dx = x - (r.cx + off), dy = y - r.cy;
-          const c = Math.cos(-it.roll), s = Math.sin(-it.roll);
-          const lx = dx * c - dy * s, ly = dx * s + dy * c;
-          if (Math.abs(lx) <= r.rw / 2 && Math.abs(ly) <= r.rh / 2) return it;
-        }
-      }
-      return null;
-    }
-
-    function select(it) {
-      selected = it;
-      selCard.hidden = !it;
-      resetOne.disabled = !it;
-      if (it) {
-        selName.textContent = `Photo ${it.n} — ${it.ring.label}`;
-        rollRange.value = Math.round(it.roll * 180 / Math.PI);
-        showPos(it);
-      }
+    function renderNow() {
+      const it = current();
+      nowName.textContent = `Photo ${it.n} — ${it.ring.label}`;
+      nowPos.textContent =
+        `${deg(wrapYaw(it.yaw))}° round, ${-deg(it.pitch)}° up/down` +
+        (it.locked ? " · locked" : " · not locked");
+      stepCount.textContent = `${at + 1} / ${items.length}`;
+      rollRange.value = deg(it.roll);
+      app.querySelectorAll(".chip").forEach((c) =>
+        c.classList.toggle("on", c.dataset.show === context));
+      renderStrip();
       draw();
     }
 
-    function showPos(it) {
-      selPos.textContent =
-        `${Math.round(wrapYaw(it.yaw) * 180 / Math.PI)}° round, ` +
-        `${Math.round(-it.pitch * 180 / Math.PI)}° up/down` +
-        (it.locked ? " — locked" : "");
+    function renderStrip() {
+      strip.innerHTML = items.map((it, i) => `
+        <button class="film ${i === at ? "on" : ""} ${it.locked ? "locked" : ""}"
+                data-i="${i}" title="Photo ${it.n} — ${escapeHtml(it.ring.label)}">
+          <img src="${OrbitAPI.imageURL(it.frame.capture_id, "thumb", it.frame.index)}"
+               onerror="this.style.visibility='hidden'" alt="">
+          <span>${it.locked ? "🔒" : ""}${it.n}</span>
+        </button>`).join("");
+      strip.querySelectorAll(".film").forEach((b) => {
+        b.addEventListener("click", () => { at = Number(b.dataset.i); renderNow(); });
+      });
+      const on = strip.querySelector(".film.on");
+      if (on) on.scrollIntoView({ block: "nearest", inline: "center" });
+    }
+
+    function sizeCanvas() {
+      const w = Math.min(canvas.parentElement.clientWidth, 1400);
+      canvas.width = Math.max(320, Math.floor(w));
+      canvas.height = Math.floor(canvas.width / 2);
+      draw();
     }
 
     function pos(ev) {
@@ -239,43 +284,45 @@ const ScreenArrange = (() => {
                y: (p.clientY - r.top) * canvas.height / r.height };
     }
 
+    // Dragging moves the photo in focus, wherever on the map you take hold:
+    // the photo being placed is the subject, so the whole canvas is its handle.
+    // Tapping another photo in view switches to it instead.
     function onDown(ev) {
       const { x, y } = pos(ev);
-      const it = hit(x, y);
-      if (!it) { select(null); return; }
-      select(it);
-      dragging = { it, x, y, moved: false };
+      const r = rectOf(current());
+      const w = canvas.width;
+      const insideCurrent = [0, -w, w].some((off) =>
+        Math.abs(x - (r.cx + off)) <= r.rw / 2 && Math.abs(y - r.cy) <= r.rh / 2);
+      if (!insideCurrent) {
+        for (let i = items.length - 1; i >= 0; i--) {
+          if (!visible(items[i]) || items[i] === current()) continue;
+          const q = rectOf(items[i]);
+          if ([0, -w, w].some((off) =>
+            Math.abs(x - (q.cx + off)) <= q.rw / 2 && Math.abs(y - q.cy) <= q.rh / 2)) {
+            at = i; renderNow(); return;
+          }
+        }
+      }
+      dragging = { x, y };
       ev.preventDefault();
     }
 
     function onMove(ev) {
       if (!dragging) return;
       const { x, y } = pos(ev);
-      const dx = x - dragging.x, dy = y - dragging.y;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragging.moved = true;
-      const it = dragging.it;
-      it.yaw = wrapYaw(it.yaw + (dx / canvas.width) * TAU);
+      const it = current();
+      it.yaw = wrapYaw(it.yaw + ((x - dragging.x) / canvas.width) * TAU);
       it.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2,
-        it.pitch + (dy / canvas.height) * Math.PI));
+        it.pitch + ((y - dragging.y) / canvas.height) * Math.PI));
       it.dirty = true;
-      dragging.x = x; dragging.y = y;
-      showPos(it);
+      dragging = { x, y };
+      nowPos.textContent = `${deg(wrapYaw(it.yaw))}° round, ${-deg(it.pitch)}° up/down` +
+        (it.locked ? " · locked" : " · not locked");
       draw();
       ev.preventDefault();
     }
 
-    function onUp() {
-      if (!dragging) return;
-      // A click with no drag is the lock. Moving a photo does not lock it by
-      // itself: you may want to nudge several before pinning any.
-      if (!dragging.moved) {
-        dragging.it.locked = !dragging.it.locked;
-        dragging.it.dirty = true;
-        showPos(dragging.it);
-      }
-      dragging = null;
-      draw();
-    }
+    const onUp = () => { dragging = null; };
 
     canvas.addEventListener("pointerdown", onDown);
     canvas.addEventListener("pointermove", onMove);
@@ -284,32 +331,57 @@ const ScreenArrange = (() => {
     canvas.addEventListener("touchmove", onMove, { passive: false });
     window.addEventListener("touchend", onUp);
 
+    function step(d) {
+      at = Math.max(0, Math.min(items.length - 1, at + d));
+      renderNow();
+    }
+    app.querySelector("#prevBtn").addEventListener("click", () => step(-1));
+    app.querySelector("#nextBtn").addEventListener("click", () => step(1));
+
+    app.querySelector("#lockNext").addEventListener("click", () => {
+      const it = current();
+      it.locked = true;
+      it.dirty = true;
+      if (at < items.length - 1) step(1); else renderNow();
+    });
+    app.querySelector("#unlockBtn").addEventListener("click", () => {
+      current().locked = false;
+      current().dirty = true;
+      renderNow();
+    });
+    app.querySelector("#resetBtn").addEventListener("click", () => {
+      const it = current();
+      const p = placed[it.frame.index];
+      if (p) { it.yaw = p.yaw; it.pitch = p.pitch; it.roll = p.roll || 0; }
+      it.locked = false;
+      it.dirty = true;
+      renderNow();
+    });
     rollRange.addEventListener("input", () => {
-      if (!selected) return;
-      selected.roll = Number(rollRange.value) * Math.PI / 180;
-      selected.dirty = true;
+      current().roll = Number(rollRange.value) * Math.PI / 180;
+      current().dirty = true;
       draw();
+    });
+    app.querySelectorAll(".chip").forEach((c) => {
+      c.addEventListener("click", () => { context = c.dataset.show; renderNow(); });
     });
 
-    resetOne.addEventListener("click", () => {
-      if (!selected) return;
-      const p = placed[selected.frame.index];
-      if (p) { selected.yaw = p.yaw; selected.pitch = p.pitch; selected.roll = p.roll || 0; }
-      selected.locked = false;
-      selected.dirty = true;
-      rollRange.value = Math.round(selected.roll * 180 / Math.PI);
-      showPos(selected);
-      draw();
-    });
-
-    app.querySelector("#lockAll").addEventListener("click", () => {
-      items.forEach((it) => { it.locked = true; it.dirty = true; });
-      draw();
-    });
-    app.querySelector("#unlockAll").addEventListener("click", () => {
-      items.forEach((it) => { it.locked = false; it.dirty = true; });
-      draw();
-    });
+    // Arrow keys nudge by a degree, which a drag cannot do precisely.
+    function onKey(e) {
+      const it = current();
+      const stepRad = Math.PI / 180;
+      if (e.key === "ArrowLeft") it.yaw = wrapYaw(it.yaw - stepRad);
+      else if (e.key === "ArrowRight") it.yaw = wrapYaw(it.yaw + stepRad);
+      else if (e.key === "ArrowUp") it.pitch = Math.max(-Math.PI / 2, it.pitch - stepRad);
+      else if (e.key === "ArrowDown") it.pitch = Math.min(Math.PI / 2, it.pitch + stepRad);
+      else if (e.key === "[") step(-1);
+      else if (e.key === "]") step(1);
+      else return;
+      it.dirty = true;
+      e.preventDefault();
+      renderNow();
+    }
+    window.addEventListener("keydown", onKey);
 
     goBtn.addEventListener("click", async () => {
       goBtn.disabled = true;
@@ -337,11 +409,13 @@ const ScreenArrange = (() => {
     const onResize = () => sizeCanvas();
     window.addEventListener("resize", onResize);
     sizeCanvas();
+    renderNow();
 
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("touchend", onUp);
+      window.removeEventListener("keydown", onKey);
     };
   }
 
