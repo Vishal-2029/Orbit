@@ -136,6 +136,15 @@ part of the system. The clean fix is a completion barrier — an atomic Redis
 counter decremented per frame, with the last decrement enqueueing finalize — and
 that is the first thing to change if frame counts grow.
 
+## 4b. Faults found on real captures
+
+Every stitching fault found on a real capture - what it looked like, the line
+the worker logged, the number that proved the cause, and where the fix lives -
+is written up in [`STITCH-FAULTS.md`](STITCH-FAULTS.md). It exists because the
+first guess was wrong about half the time: the "too dark" panorama turned out to
+be dark photographs, and the rebuild that "changed nothing" was a caching
+header. Measure first, and the log line usually names the section.
+
 ## 5. Things that bit us during this build
 
 | Problem | Cause | Fix |

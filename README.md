@@ -36,6 +36,7 @@ will otherwise leave you looking at a black rectangle.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the pieces fit, and why the stack deviates from the brief |
 | [`docs/API.md`](docs/API.md) | Every endpoint, with real request and response bodies |
 | [`docs/CHALLENGES.md`](docs/CHALLENGES.md) | **What's genuinely hard, what broke, and what is deliberately not built** |
+| [`docs/STITCH-FAULTS.md`](docs/STITCH-FAULTS.md) | **When a 360 comes out wrong** — what each fault looks like, the log line, and the measurement that found it |
 | [`docs/STORAGE.md`](docs/STORAGE.md) | Storage layout, the two-bucket split, orphan cleanup |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | **Hosting it online for free**, and what to secure first |
 
