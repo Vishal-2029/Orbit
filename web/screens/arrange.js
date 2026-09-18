@@ -158,7 +158,17 @@ const ScreenArrange = (() => {
             <span class="muted" style="font-size:.82rem">the photo frames where they sit, seen from the middle</span>
           </div>
 
-          <div class="arrange-stage">
+          <div class="arrange-stage" id="stage">
+            <div class="stage-bar">
+              <div class="stage-step-group">
+                <button id="prevTop" title="Previous photo">‹</button>
+                <span id="countTop"></span>
+                <button id="nextTop" title="Next photo">›</button>
+              </div>
+              <span class="stage-now" id="nowTop"></span>
+              <button id="lockTop" class="stage-lock">Lock</button>
+              <button id="fsExit" hidden>Close</button>
+            </div>
             <canvas id="map"></canvas>
             <div id="model3d" class="arrange-3d" hidden></div>
           </div>
@@ -216,7 +226,27 @@ const ScreenArrange = (() => {
       return stage().match(it);
     }
 
-    function drawOne(it, focused) {
+    // Which part this photo plays right now. Fixing a photo means judging it
+    // against the one before and the one after it, so those two are named and
+    // coloured rather than left in the crowd.
+    function roleOf(it) {
+      const list = inStage();
+      if (it === current()) return "focus";
+      if (it === list[at - 1]) return "prev";
+      if (it === list[at + 1]) return "next";
+      return "other";
+    }
+
+    const ROLE = {
+      focus: { edge: "#ffd84d", alpha: 1, label: (n) => `Photo ${n}` },
+      prev: { edge: "#5b8cff", alpha: 0.6, label: (n) => `‹ Photo ${n}` },
+      next: { edge: "#ff9f43", alpha: 0.6, label: (n) => `Photo ${n} ›` },
+      other: { edge: "rgba(255,255,255,.25)", alpha: 0.18, label: null },
+    };
+
+    function drawOne(it, role) {
+      const focused = role === "focus";
+      const look = ROLE[role];
       const w = canvas.width;
       const r = rectOf(it);
       // Drawn at both ends when it straddles the seam, so a photo near the edge
@@ -227,7 +257,7 @@ const ScreenArrange = (() => {
         ctx.save();
         ctx.translate(cx, r.cy);
         ctx.rotate(it.roll);
-        ctx.globalAlpha = focused ? 1 : 0.22;
+        ctx.globalAlpha = look.alpha;
         if (it.img && it.img.complete && it.img.naturalWidth) {
           ctx.drawImage(it.img, -r.rw / 2, -r.rh / 2, r.rw, r.rh);
         } else {
@@ -235,23 +265,24 @@ const ScreenArrange = (() => {
           ctx.fillRect(-r.rw / 2, -r.rh / 2, r.rw, r.rh);
         }
         ctx.globalAlpha = 1;
-        ctx.lineWidth = focused ? 3 : 1;
-        ctx.strokeStyle = focused ? "#ffd84d"
-          : it.locked ? "rgba(53,208,127,.55)" : "rgba(255,255,255,.25)";
+        ctx.lineWidth = focused ? 3 : role === "other" ? 1 : 2;
+        ctx.strokeStyle = role === "other" && it.locked
+          ? "rgba(53,208,127,.55)" : look.edge;
         ctx.strokeRect(-r.rw / 2, -r.rh / 2, r.rw, r.rh);
         ctx.restore();
 
-        // Only the photo in focus is named on the map. Thirty-two labels at
-        // once was the unreadable part; the filmstrip below carries the rest.
-        if (focused) {
-          const label = `${it.locked ? "🔒 " : ""}Photo ${it.n}`;
+        // The photo in hand and its two neighbours are named; the rest are
+        // not. Thirty-two labels at once was the unreadable part, and these
+        // three are the ones a fix is judged against.
+        if (look.label) {
+          const label = `${it.locked ? "🔒 " : ""}${look.label(it.n)}`;
           ctx.font = "700 15px system-ui, sans-serif";
           ctx.textAlign = "center";
           const tw = ctx.measureText(label).width + 14;
           const ty = Math.max(12, r.cy - r.rh / 2 - 22);
           ctx.fillStyle = "rgba(10,12,18,.85)";
           ctx.fillRect(cx - tw / 2, ty, tw, 22);
-          ctx.fillStyle = it.locked ? "#35d07f" : "#ffd84d";
+          ctx.fillStyle = it.locked && focused ? "#35d07f" : look.edge;
           ctx.fillText(label, cx, ty + 16);
         }
       });
@@ -280,8 +311,13 @@ const ScreenArrange = (() => {
       ctx.fillText("straight up", 6, 14);
       ctx.fillText("straight down", 6, h - 6);
 
-      items.forEach((it) => { if (it !== current() && visible(it)) drawOne(it, false); });
-      drawOne(current(), true);
+      // Drawn back to front: the crowd, then the neighbours, then the photo in
+      // hand on top of everything.
+      const order = { other: 0, prev: 1, next: 1, focus: 2 };
+      items.filter(visible)
+        .map((it) => [it, roleOf(it)])
+        .sort((a, b) => order[a[1]] - order[b[1]])
+        .forEach(([it, role]) => drawOne(it, role));
       if (model) model.refresh();
 
       const locked = items.filter((i) => i.locked).length;
@@ -319,7 +355,12 @@ const ScreenArrange = (() => {
       nowPos.textContent =
         `${deg(wrapYaw(it.yaw))}° round, ${-deg(it.pitch)}° up/down` +
         (it.locked ? " · locked" : " · not locked");
-      stepCount.textContent = `${Math.min(at + 1, inStage().length)} / ${inStage().length}`;
+      const posText = `${Math.min(at + 1, inStage().length)} / ${inStage().length}`;
+      stepCount.textContent = posText;
+      app.querySelector("#countTop").textContent = posText;
+      app.querySelector("#nowTop").textContent =
+        `Photo ${it.n} · ${it.ring.label}${it.locked ? " · locked" : ""}`;
+      app.querySelector("#lockTop").textContent = it.locked ? "Unlock" : "Lock";
       rollRange.value = deg(it.roll);
       app.querySelectorAll(".chip[data-show]").forEach((c) =>
         c.classList.toggle("on", c.dataset.show === context));
@@ -413,6 +454,14 @@ const ScreenArrange = (() => {
     }
     app.querySelector("#prevBtn").addEventListener("click", () => step(-1));
     app.querySelector("#nextBtn").addEventListener("click", () => step(1));
+    // The same stepper over the picture, because that is where the eyes are.
+    app.querySelector("#prevTop").addEventListener("click", () => step(-1));
+    app.querySelector("#nextTop").addEventListener("click", () => step(1));
+    app.querySelector("#lockTop").addEventListener("click", () => {
+      current().locked = !current().locked;
+      current().dirty = true;
+      renderNow();
+    });
 
     app.querySelector("#lockNext").addEventListener("click", () => {
       const it = current();
@@ -460,18 +509,35 @@ const ScreenArrange = (() => {
     // The flat map and the 3D model are two views of the same arrangement, so
     // switching between them changes nothing but how it is looked at.
     const modelHost = app.querySelector("#model3d");
+    const stageEl = app.querySelector("#stage");
+    const fsExit = app.querySelector("#fsExit");
+
     function setView(next) {
       view = next;
       canvas.hidden = view !== "map";
       modelHost.hidden = view !== "model";
+      // The model is a room to look around, not a panel to peer into - on a
+      // phone especially - so it takes the whole screen and gives it back.
+      stageEl.classList.toggle("fullscreen", view === "model");
+      fsExit.hidden = view !== "model";
+      document.body.classList.toggle("no-scroll", view === "model");
       if (view === "model") {
         if (!model) {
           model = Arrange3D.create(modelHost, items, {
+            roleOf,
             isVisible: (it) => visible(it),
             isFocused: (it) => it === current(),
             onSelect: (it) => {
               const i = inStage().indexOf(it);
               if (i >= 0) { at = i; renderNow(); }
+            },
+            // Dragging the photo in hand moves it here too: the model is where
+            // a position is judged, so it has to be where it can be fixed.
+            onMove: (it, yaw, pitch) => {
+              it.yaw = yaw; it.pitch = pitch; it.dirty = true;
+              nowPos.textContent = `${deg(wrapYaw(it.yaw))}° round, ${-deg(it.pitch)}° up/down` +
+                (it.locked ? " · locked" : " · not locked");
+              draw();
             },
           });
           if (!model) {
@@ -486,6 +552,7 @@ const ScreenArrange = (() => {
     app.querySelectorAll(".chip[data-view]").forEach((c) => {
       c.addEventListener("click", () => setView(c.dataset.view));
     });
+    fsExit.addEventListener("click", () => setView("map"));
 
     // Arrow keys nudge by a degree, which a drag cannot do precisely.
     function onKey(e) {
@@ -497,6 +564,7 @@ const ScreenArrange = (() => {
       else if (e.key === "ArrowDown") it.pitch = Math.min(Math.PI / 2, it.pitch + stepRad);
       else if (e.key === "[") step(-1);
       else if (e.key === "]") step(1);
+      else if (e.key === "Escape" && view === "model") { setView("map"); return; }
       else return;
       it.dirty = true;
       e.preventDefault();
@@ -533,6 +601,7 @@ const ScreenArrange = (() => {
     renderNow();
 
     return () => {
+      document.body.classList.remove("no-scroll");
       if (model) model.destroy();
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointerup", onUp);
