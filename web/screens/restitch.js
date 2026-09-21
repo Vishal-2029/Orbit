@@ -203,12 +203,20 @@ const ScreenRestitch = (() => {
         // The ring's own stitch, made while the capture was still being shot.
         // Worth showing here because it answers the question this screen asks -
         // is this ring any good? - without rebuilding the whole 360 first.
+        // Where the camera travelled rather than turned. Worth saying next to
+        // the ring, because it names the photos whose joins will tear and that
+        // only a reshoot - turning on the spot - can fix.
+        const moved = row && row.moved && row.moved.length
+          ? `<div class="ring-moved">The camera moved at ${escapeHtml(PhotoNames.movedText(row.moved, num))}.
+               Reshoot those turning the phone on the spot to fix the tears there.</div>`
+          : "";
         const preview = row && row.panorama ? `
           <div class="ring-preview">
             <img src="${row.panorama}" alt="${escapeHtml(g.ring.label)} stitched"
                  loading="lazy" onerror="this.closest('.ring-preview').hidden=true">
             <div class="muted">${escapeHtml(row.note || "")}</div>
-          </div>` : "";
+            ${moved}
+          </div>` : moved;
         const state = row
           ? `<span class="badge ${row.status === "ready" ? "ready" : row.status === "failed" ? "failed" : "processing"}">${escapeHtml(row.status)}</span>`
           : "";

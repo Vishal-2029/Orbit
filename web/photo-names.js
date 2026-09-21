@@ -76,6 +76,33 @@ const PhotoNames = (() => {
       .sort((a, b) => a.ring.order - b.ring.order || a.ring.id.localeCompare(b.ring.id));
   }
 
+  /**
+   * The photos a ring's movement check flagged, as words: "Photos 5 to 9 and
+   * 12 to 1". Joins that run on from each other are merged into one run, since
+   * reshooting is done a stretch at a time, not a pair at a time.
+   *
+   * moved  [{a, b}] frame indexes, in the order they sit round the ring
+   * num    frame index -> photo number (PhotoNames.numbers)
+   */
+  function movedText(moved, num) {
+    if (!moved || !moved.length) return "";
+    const n = (idx) => (num && num[idx]) || idx + 1;
+    const runs = [];
+    moved.forEach((m) => {
+      const last = runs[runs.length - 1];
+      if (last && last[last.length - 1] === m.a) last.push(m.b);
+      else runs.push([m.a, m.b]);
+    });
+    // A run that ends where the first began goes all the way round the seam.
+    if (runs.length > 1 && runs[runs.length - 1].slice(-1)[0] === runs[0][0]) {
+      runs[0] = runs.pop().concat(runs[0].slice(1));
+    }
+    const parts = runs.map((r) => r.length === 2
+      ? `${n(r[0])} and ${n(r[1])}`
+      : `${n(r[0])} to ${n(r[r.length - 1])}`);
+    return `Photos ${parts.join(", ")}`;
+  }
+
   /** Map of frame index -> photo number, from the capture's full frame list. */
   function numbers(frames) {
     const map = {};
@@ -84,5 +111,5 @@ const PhotoNames = (() => {
     return map;
   }
 
-  return { facing, tilt, position, numbers, ring, byRing, RINGS };
+  return { facing, tilt, position, numbers, ring, byRing, RINGS, movedText };
 })();

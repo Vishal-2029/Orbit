@@ -69,6 +69,12 @@ const ScreenCapture = (() => {
     const statusPill = app.querySelector("#statusPill");
     const thumbStrip = app.querySelector("#thumbStrip");
     const finishBtn = app.querySelector("#finishBtn");
+    // Stays up until dismissed, unlike say(): it asks for something to be
+    // redone, and a message that fades in four seconds is one that gets missed.
+    const moveBanner = document.createElement("div");
+    moveBanner.className = "move-banner";
+    moveBanner.hidden = true;
+    app.querySelector(".cam-overlay").appendChild(moveBanner);
     const coverWarn = app.querySelector("#coverWarn");
     const retakeBtn = app.querySelector("#retakeBtn");
     const setFrontBtn = app.querySelector("#setFrontBtn");
@@ -1010,12 +1016,54 @@ const ScreenCapture = (() => {
         await Promise.all(shots.map((sh) => sh.upload).filter(Boolean));
         await OrbitAPI.processRing(captureId, ring.id);
         say(`${ring.label} sent for stitching \u2014 keep shooting`);
+        watchRing(ring);
       } catch (e) {
         // A preview is a bonus, never the capture. Losing one costs nothing:
         // the final build still uses every photo.
         state.ringsSent.delete(ring.id);
         console.log("[orbit] ring stitch not started:", e.message);
       }
+    }
+
+    // Wait for a ring's check to come back, and if the camera travelled
+    // between any of its photos, say which - now, while the photographer is
+    // still standing there and can reshoot them. Nothing in the room moved;
+    // swinging the phone round at arm's length moves the VIEWPOINT, and close
+    // things then tear at the join. Reshooting those photos turning on the spot
+    // fixes it; no amount of stitching afterwards can.
+    async function watchRing(ring) {
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 4000));
+        let row;
+        try {
+          row = ((await OrbitAPI.listRings(captureId)).rings || [])
+            .find((r) => r.ring === ring.id);
+        } catch (_) {
+          continue;
+        }
+        if (!row || row.status === "queued" || row.status === "processing") continue;
+        if (row.moved && row.moved.length) {
+          let num = {};
+          try {
+            num = PhotoNames.numbers((await OrbitAPI.listFrames(captureId)).frames || []);
+          } catch (_) { /* numbered by index below */ }
+          warnMoved(ring, PhotoNames.movedText(row.moved, num));
+        }
+        return;
+      }
+    }
+
+    function warnMoved(ring, which) {
+      moveBanner.hidden = false;
+      moveBanner.innerHTML = `
+        <strong>${escapeHtml(ring.label)}: the camera moved at ${escapeHtml(which)}.</strong>
+        <span>Nothing in the room moved \u2014 the phone did, swinging round your body.
+        Reshoot those turning the phone on the spot: keep it over the same point and
+        step your feet around it.</span>
+        <button type="button">Got it</button>`;
+      moveBanner.querySelector("button").addEventListener("click", () => {
+        moveBanner.hidden = true;
+      });
     }
 
     // A short note that does not shout: the camera screen is busy enough.

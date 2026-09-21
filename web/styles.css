@@ -334,6 +334,27 @@ body.no-scroll { overflow: hidden; }
   .chip { min-height: 34px; }
 }
 
+/* The camera moved between photos: say so on the camera screen, and keep it
+   up until it has been read - it asks for photos to be reshot. */
+.move-banner {
+  position: absolute; left: 12px; right: 12px;
+  bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+  z-index: 6; padding: 12px 14px; border-radius: 12px;
+  background: rgba(58,48,16,.94); color: #ffd98a;
+  font-size: .88rem; line-height: 1.35;
+  display: flex; flex-direction: column; gap: 6px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.4);
+}
+.move-banner strong { color: #ffe7b0; }
+.move-banner button {
+  align-self: flex-end; padding: 6px 14px; border-radius: 999px;
+  background: rgba(255,255,255,.15); color: #fff; font-size: .82rem;
+}
+.ring-moved {
+  margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+  background: #3a3010; color: var(--warn); font-size: .82rem; line-height: 1.35;
+}
+
 /* A ring's own stitch, shown above its photos on the restitch screen. */
 .ring-preview {
   background: var(--panel); border-radius: 12px; padding: 8px; margin-bottom: 8px;
