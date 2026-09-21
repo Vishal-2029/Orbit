@@ -333,26 +333,39 @@ func (r *Repo) ResetForReprocess(ctx context.Context, captureID string) error {
 func (r *Repo) UpsertRing(ctx context.Context, ring *domain.CaptureRing) error {
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO capture_rings (capture_id, ring, status, panorama_key, width, height,
-		                           photos_used, photos_total, note, updated_at)
-		VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULLIF($9,''),now())
+		                           photos_used, photos_total, note, moved, updated_at)
+		VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULLIF($9,''),$10,now())
 		ON CONFLICT (capture_id, ring) DO UPDATE SET
 			status=EXCLUDED.status, panorama_key=EXCLUDED.panorama_key,
 			width=EXCLUDED.width, height=EXCLUDED.height,
 			photos_used=EXCLUDED.photos_used, photos_total=EXCLUDED.photos_total,
-			note=EXCLUDED.note, updated_at=now()`,
+			note=EXCLUDED.note, moved=EXCLUDED.moved, updated_at=now()`,
 		ring.CaptureID, ring.Ring, ring.Status, ring.Panorama, ring.Width, ring.Height,
-		ring.PhotosUsed, ring.PhotosTotal, ring.Note)
+		ring.PhotosUsed, ring.PhotosTotal, ring.Note, movedJSON(ring.Moved))
 	if err != nil && isBadUUID(err) {
 		return ErrNotFound
 	}
 	return err
 }
 
+// movedJSON stores a ring's moved joins, or NULL when there are none, so an
+// empty list and "never checked" read back the same way.
+func movedJSON(m []domain.RingJoin) []byte {
+	if len(m) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
 func (r *Repo) ListRings(ctx context.Context, captureID string) ([]domain.CaptureRing, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT capture_id, ring, status, COALESCE(panorama_key,''), COALESCE(width,0),
 		       COALESCE(height,0), COALESCE(photos_used,0), COALESCE(photos_total,0),
-		       COALESCE(note,''), updated_at
+		       COALESCE(note,''), moved, updated_at
 		FROM capture_rings WHERE capture_id=$1 ORDER BY ring`, captureID)
 	if err != nil {
 		if isBadUUID(err) {
@@ -364,9 +377,13 @@ func (r *Repo) ListRings(ctx context.Context, captureID string) ([]domain.Captur
 	out := []domain.CaptureRing{}
 	for rows.Next() {
 		var g domain.CaptureRing
+		var moved []byte
 		if err := rows.Scan(&g.CaptureID, &g.Ring, &g.Status, &g.Panorama, &g.Width,
-			&g.Height, &g.PhotosUsed, &g.PhotosTotal, &g.Note, &g.UpdatedAt); err != nil {
+			&g.Height, &g.PhotosUsed, &g.PhotosTotal, &g.Note, &moved, &g.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if len(moved) > 0 {
+			_ = json.Unmarshal(moved, &g.Moved)
 		}
 		out = append(out, g)
 	}

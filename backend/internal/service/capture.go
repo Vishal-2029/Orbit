@@ -345,10 +345,37 @@ func (s *Capture) FinalizeRing(ctx context.Context, captureID, ring string, in d
 	if msg == "" {
 		msg = fmt.Sprintf("%s stitched from %d photos", ring, in.PhotosUsed)
 	}
+	if len(in.Moved) > 0 {
+		msg += " - " + s.describeMoved(ctx, captureID, in.Moved)
+	}
 	s.hub.Publish(ctx, realtime.Event{
 		Type: "ring", CaptureID: captureID, Ring: ring, Status: in.Status, Message: msg,
 	})
 	return &in, nil
+}
+
+// describeMoved says which photos to reshoot, numbered the way the screens
+// number them: a photo's position among all of the capture's photos in shot
+// order, so "Photo 5" in the log is Photo 5 on the restitch screen.
+func (s *Capture) describeMoved(ctx context.Context, captureID string, moved []domain.RingJoin) string {
+	num := map[int]int{}
+	if frames, err := s.repo.ListFrames(ctx, captureID); err == nil {
+		for i, f := range frames {
+			num[f.Index] = i + 1
+		}
+	}
+	name := func(idx int) int {
+		if n, ok := num[idx]; ok {
+			return n
+		}
+		return idx + 1
+	}
+	parts := make([]string, 0, len(moved))
+	for _, m := range moved {
+		parts = append(parts, fmt.Sprintf("%d and %d", name(m.A), name(m.B)))
+	}
+	return "the camera moved between photos " + strings.Join(parts, ", ") +
+		"; reshoot those turning on the spot"
 }
 
 func (s *Capture) Rings(ctx context.Context, captureID string) ([]domain.CaptureRing, error) {

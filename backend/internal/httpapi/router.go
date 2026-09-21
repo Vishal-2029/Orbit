@@ -331,13 +331,14 @@ func (s *Server) workerRingFinalize(c *fiber.Ctx) error {
 	// built from it on the way out. Same picture, different things, so they do
 	// not share a JSON name - which they silently did, and the key was dropped.
 	var body struct {
-		Status      string `json:"status"`
-		PanoramaKey string `json:"panorama_key"`
-		Width       int    `json:"width"`
-		Height      int    `json:"height"`
-		PhotosUsed  int    `json:"photos_used"`
-		PhotosTotal int    `json:"photos_total"`
-		Note        string `json:"note"`
+		Status      string            `json:"status"`
+		PanoramaKey string            `json:"panorama_key"`
+		Width       int               `json:"width"`
+		Height      int               `json:"height"`
+		PhotosUsed  int               `json:"photos_used"`
+		PhotosTotal int               `json:"photos_total"`
+		Note        string            `json:"note"`
+		Moved       []domain.RingJoin `json:"moved"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
@@ -346,6 +347,7 @@ func (s *Server) workerRingFinalize(c *fiber.Ctx) error {
 		Status: body.Status, Panorama: body.PanoramaKey,
 		Width: body.Width, Height: body.Height,
 		PhotosUsed: body.PhotosUsed, PhotosTotal: body.PhotosTotal, Note: body.Note,
+		Moved: body.Moved,
 	}
 	ring, err := s.svc.FinalizeRing(c.Context(), c.Params("id"), ringParam(c), in)
 	if err != nil {

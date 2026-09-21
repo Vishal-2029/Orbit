@@ -1,0 +1,11 @@
+-- Which neighbouring photos in a ring were taken from different points.
+--
+-- A 360 assumes every photo was shot from one spot: the camera turns, it does
+-- not travel. Swing a phone round at arm's length and it travels half a metre,
+-- and close things tear at the join - a staircase, a door, a wall. No stitcher
+-- can undo that; reshooting those photos turning on the spot can. So each ring
+-- is checked as it is stitched, and the joins where the camera moved are kept
+-- here to be shown while the photographer can still act on them.
+--
+-- [{"a": frame index, "b": frame index, "turned": n, "moved": n, "ratio": r}]
+ALTER TABLE capture_rings ADD COLUMN IF NOT EXISTS moved jsonb;

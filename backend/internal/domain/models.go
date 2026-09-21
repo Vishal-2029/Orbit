@@ -225,13 +225,30 @@ type CaptureRing struct {
 	Status    string `json:"status"` // queued | processing | ready | partial | failed
 	// Panorama holds the storage key inside the server, and the URL built from
 	// it by the time a client sees it. Empty until the ring has stitched.
-	Panorama    string    `json:"panorama,omitempty"`
-	Width       int       `json:"width,omitempty"`
-	Height      int       `json:"height,omitempty"`
-	PhotosUsed  int       `json:"photos_used,omitempty"`
-	PhotosTotal int       `json:"photos_total,omitempty"`
-	Note        string    `json:"note,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Panorama    string `json:"panorama,omitempty"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	PhotosUsed  int    `json:"photos_used,omitempty"`
+	PhotosTotal int    `json:"photos_total,omitempty"`
+	Note        string `json:"note,omitempty"`
+	// Moved lists the neighbouring photos the camera travelled between rather
+	// than only turning - the joins that will tear, and the photos to reshoot.
+	Moved     []RingJoin `json:"moved,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// RingJoin is one join in a ring where the camera moved between photos.
+//
+// A and B are frame indexes, the same ones everything else uses. Turned and
+// Moved are how many matched points each explanation accounts for - a turn
+// alone, or a turn and a move; Ratio is the second over the first, around 1
+// when the camera stayed put and 2 or more when it travelled.
+type RingJoin struct {
+	A      int     `json:"a"`
+	B      int     `json:"b"`
+	Turned int     `json:"turned"`
+	Moved  int     `json:"moved"`
+	Ratio  float64 `json:"ratio"`
 }
 
 // PhotoMarker is where one photo's centre landed on a finished sphere.
