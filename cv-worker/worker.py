@@ -35,6 +35,7 @@ from ops.tiles import cut_tiles, face_size_for, levels_for
 from ops.feature_stitch import stitch_with_features
 from ops.finish import MIN_SPHERE_COVERAGE, finish_panorama
 from ops.coverage import describe_leftovers, sphere_coverage
+from ops.parallax import find_moved_joins
 from ops.pose_stitch import (DEFAULT_HFOV_DEG, quaternion_from_heading,
                              quaternion_to_matrix, rotation_from_view,
                              stitch_with_poses)
@@ -724,9 +725,12 @@ def handle_ring_job(mc, capture_id, ring):
         return
 
     images, loaded = [], []
+    lens_hfov = None
     for f in sort_ring_by_yaw(done):
         try:
             raw = get_object_bytes(mc, settings.bucket_private, f["original_key"])
+            if lens_hfov is None:
+                lens_hfov = exif_hfov(raw)
             img = decode_with_exif_rotation(raw)
             if img is not None and img.shape[1] > settings.target_width_default:
                 img = resize_to_width(img, settings.target_width_default)
@@ -743,12 +747,24 @@ def handle_ring_job(mc, capture_id, ring):
                                        "note": "This ring's photos could not be read."})
         return
 
+    # Did the camera travel between neighbouring photos, rather than only
+    # turn? Nothing in the room moves, but the viewpoint does when a phone is
+    # swung round at arm's length, and close things then tear at the join. No
+    # stitcher can undo that - reshooting those photos on the spot can - so it
+    # is checked now, while the photographer is still standing there. Before
+    # the stitch, because the stitch releases the photos.
+    moved = find_moved_joins(images, [int(f["index"]) for f in loaded],
+                             lens_hfov or DEFAULT_HFOV_DEG, closed=len(images) > 2)
+    if moved:
+        log.info("%s ring %s: the camera moved at %d join(s): %s", PREFIX, ring, len(moved),
+                 ", ".join("%s-%s" % (m["a"], m["b"]) for m in moved))
+
     quats = [_pose_of(f) for f in loaded]
     ok, pano, reason, geom = (False, None, "No photo carries camera rotation data.", None)
     if sum(1 for q in quats if q is not None) >= len(quats) * 0.8:
         # Photos placed by hand are anchors: the build puts them exactly where
         # they were put, and no solve may move them.
-        locked = [_manual_rotation(f) for f in ring]
+        locked = [_manual_rotation(f) for f in loaded]
         ok, pano, reason, geom = stitch_with_poses(images, quats, locked=locked)
     if not ok or pano is None:
         ok, pano, reason, geom, _ = stitch_with_features(images)
@@ -756,7 +772,7 @@ def handle_ring_job(mc, capture_id, ring):
     if not ok or pano is None:
         log.warning("%s ring %s did not stitch: %s", PREFIX, ring, reason)
         report_ring(capture_id, ring, {"status": "failed", "photos_total": len(mine),
-                                       "photos_used": 0, "note": reason})
+                                       "photos_used": 0, "note": reason, "moved": moved})
         return
 
     # A ring is not a sphere and must not be shaped like one: it is one band of
@@ -790,6 +806,7 @@ def handle_ring_job(mc, capture_id, ring):
         "width": w, "height": h,
         "photos_used": len(loaded), "photos_total": len(mine),
         "note": note,
+        "moved": moved,
     })
 
 
