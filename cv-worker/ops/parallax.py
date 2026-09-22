@@ -56,6 +56,15 @@ MOVED_RATIO = 1.6
 # pair with a dozen matches in total says nothing either way.
 MIN_MOVED_INLIERS = 15
 
+# A second way to be flagged, for photos with plenty of detail. The ratio says
+# what SHARE of the matches is near enough to shift; in a busy scene the far
+# wall can hold most of the matches and keep the ratio low while dozens of near
+# points still refuse to line up. A turn and a move explained the same number
+# of points to within a couple at every clean join measured, so forty more is
+# no accident of the looser model.
+MOVED_EXTRA = 40
+MOVED_EXTRA_RATIO = 1.3
+
 
 def _k(w, h, hfov_deg):
     f = (w / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
@@ -87,13 +96,21 @@ def _turn_inliers(pa, pb, k, iters=1200):
     return best
 
 
-def check_pair(img_a, img_b, hfov_deg, sift=None, matcher=None):
-    """(turned, moved, matches): points explained by a turn alone, by a turn
-    and a move, and how many were matched in all. None if they barely match."""
-    sift = sift or cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.02)
-    matcher = matcher or cv2.BFMatcher()
-    ka, da = sift.detectAndCompute(cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY), None)
-    kb, db = sift.detectAndCompute(cv2.cvtColor(img_b, cv2.COLOR_BGR2GRAY), None)
+# Lens widths tried when the photos do not say how wide they are. The turn test
+# is only fair with the right one: a pure rotation seen through the wrong lens
+# model does not line up, and every join then looks as though the camera moved.
+# Measured: without EXIF, a ring of photos from a 78-degree lens checked at the
+# 63-degree default flagged 10 of 12 joins, most of them clean.
+HFOV_SCAN_DEG = tuple(range(45, 116, 5))
+
+
+def _features(img, sift):
+    return sift.detectAndCompute(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), None)
+
+
+def _match(fa, fb, matcher):
+    ka, da = fa
+    kb, db = fb
     if da is None or db is None or len(da) < 2 or len(db) < 2:
         return None
     good = [m for m, s in matcher.knnMatch(da, db, k=2) if m.distance < 0.75 * s.distance]
@@ -101,24 +118,54 @@ def check_pair(img_a, img_b, hfov_deg, sift=None, matcher=None):
         return None
     pa = np.float32([ka[m.queryIdx].pt for m in good])
     pb = np.float32([kb[m.trainIdx].pt for m in good])
-    h, w = img_a.shape[:2]
+    return pa, pb
+
+
+def _measure(pa, pb, w, h, hfov_deg):
     k = _k(w, h, hfov_deg)
     turned = _turn_inliers(pa, pb, k)
     e, mask = cv2.findEssentialMat(pa, pb, k, cv2.RANSAC, 0.999, 1.0)
     moved = int(mask.sum()) if e is not None and mask is not None else 0
-    return turned, moved, len(good)
+    return turned, moved
 
 
-def find_moved_joins(images, labels, hfov_deg, closed=True):
+def estimate_hfov(pairs, w, h):
+    """The lens width under which the most matched points are a pure turn.
+
+    A ring shares one lens, so every pair votes on the same number. Coarse
+    first, then to the nearest degree around the winner.
+    """
+    def score(fov):
+        return sum(_turn_inliers(pa, pb, _k(w, h, fov), iters=300) for pa, pb in pairs)
+    best = max(HFOV_SCAN_DEG, key=score)
+    return max(range(best - 4, best + 5), key=score)
+
+
+def check_pair(img_a, img_b, hfov_deg, sift=None, matcher=None):
+    """(turned, moved, matches): points explained by a turn alone, by a turn
+    and a move, and how many were matched in all. None if they barely match."""
+    sift = sift or cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.02)
+    matcher = matcher or cv2.BFMatcher()
+    m = _match(_features(img_a, sift), _features(img_b, sift), matcher)
+    if m is None:
+        return None
+    h, w = img_a.shape[:2]
+    turned, moved = _measure(m[0], m[1], w, h, hfov_deg)
+    return turned, moved, len(m[0])
+
+
+def find_moved_joins(images, labels, hfov_deg=None, closed=True):
     """Which neighbouring photos in a ring were taken from different points.
 
-    images  the ring's photos in the order they sit round it
-    labels  one identifier per photo, handed back to name the joins
-    closed  whether the last photo joins the first (a full ring does)
+    images   the ring's photos in the order they sit round it
+    labels   one identifier per photo, handed back to name the joins
+    hfov_deg the lens's width when the photos say it (EXIF); None to measure it
+    closed   whether the last photo joins the first (a full ring does)
 
-    Returns [{"a": label, "b": label, "turned": n, "moved": n, "ratio": r}] for
-    the joins where the camera moved. Never raises: a check that fails is a
-    check that found nothing, and a preview must never be lost to it.
+    Returns [{"a": label, "b": label, "i": pos, "j": pos, "turned": n,
+    "moved": n, "ratio": r}] for the joins where the camera moved, i and j
+    being positions in `images`. Never raises: a check that fails is a check
+    that found nothing, and a preview must never be lost to it.
     """
     moved = []
     n = len(images)
@@ -133,17 +180,33 @@ def find_moved_joins(images, labels, hfov_deg, closed=True):
                                     interpolation=cv2.INTER_AREA) if s < 1 else img)
         sift = cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.02)
         matcher = cv2.BFMatcher()
+        # Each photo is in two joins; find its features once, not twice.
+        feats = [_features(img, sift) for img in small]
+        h, w = small[0].shape[:2]
         last = n if closed and n > 2 else n - 1
+        joins = []
         for i in range(last):
             j = (i + 1) % n
-            res = check_pair(small[i], small[j], hfov_deg, sift, matcher)
-            if res is None:
+            if small[j].shape[:2] != (h, w):
                 continue
-            turned, moved_n, _ = res
+            m = _match(feats[i], feats[j], matcher)
+            if m is not None:
+                joins.append((i, j, m[0], m[1]))
+        if not joins:
+            return moved
+        if not hfov_deg:
+            hfov_deg = estimate_hfov([(pa, pb) for _, _, pa, pb in joins], w, h)
+            log.info("[orbit-worker] movement check: no lens width in the photos; "
+                     "measured %d degrees", hfov_deg)
+        for i, j, pa, pb in joins:
+            turned, moved_n = _measure(pa, pb, w, h, hfov_deg)
             ratio = moved_n / float(max(1, turned))
-            if moved_n >= MIN_MOVED_INLIERS and ratio >= MOVED_RATIO:
-                moved.append({"a": labels[i], "b": labels[j], "turned": turned,
-                              "moved": moved_n, "ratio": round(ratio, 2)})
+            if moved_n >= MIN_MOVED_INLIERS and (
+                    ratio >= MOVED_RATIO or
+                    (moved_n - turned >= MOVED_EXTRA and ratio >= MOVED_EXTRA_RATIO)):
+                moved.append({"a": labels[i], "b": labels[j], "i": i, "j": j,
+                              "turned": turned, "moved": moved_n,
+                              "ratio": round(ratio, 2)})
     except Exception as e:
         log.warning("[orbit-worker] movement check skipped (%s: %s)", type(e).__name__, e)
     return moved
