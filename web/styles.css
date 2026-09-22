@@ -346,6 +346,8 @@ body.no-scroll { overflow: hidden; }
   box-shadow: 0 6px 24px rgba(0,0,0,.4);
 }
 .move-banner strong { color: #ffe7b0; }
+.move-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.move-banner .move-actions .primary { background: var(--accent, #3b82f6); }
 .move-banner button {
   align-self: flex-end; padding: 6px 14px; border-radius: 999px;
   background: rgba(255,255,255,.15); color: #fff; font-size: .82rem;
@@ -359,9 +361,17 @@ body.no-scroll { overflow: hidden; }
 .ring-preview {
   background: var(--panel); border-radius: 12px; padding: 8px; margin-bottom: 8px;
 }
+/* The picture is shown whole, never cropped: the seam marks are placed as a
+   share of its width and would drift off their joins in a cropped one. */
+.ring-pic { position: relative; }
 .ring-preview img {
-  display: block; width: 100%; border-radius: 8px;
-  max-height: 140px; object-fit: cover; object-position: center;
+  display: block; width: 100%; height: auto; border-radius: 8px;
+}
+.seam-mark {
+  position: absolute; top: 0; bottom: 0; width: 6%; transform: translateX(-50%);
+  background: linear-gradient(90deg, transparent, rgba(255,70,70,.45), transparent);
+  border-left: 1px dashed rgba(255,90,90,.9); border-right: 1px dashed rgba(255,90,90,.9);
+  pointer-events: auto;
 }
 .ring-preview .muted { font-size: .8rem; margin-top: 6px; }
 
@@ -1298,4 +1308,56 @@ img, canvas, video { max-width: 100%; }
 .auto-btn.active {
   background: #3ddc84; color: #06210f; opacity: 1;
   box-shadow: 0 0 12px rgba(61,220,132,.45);
+}
+
+/* How to hold the phone: a top-down view of the photographer, twice. */
+.coach {
+  position: absolute; inset: 0; z-index: 20; display: flex; align-items: center;
+  justify-content: center; padding: 16px; background: rgba(0,0,0,.72);
+}
+.coach-card {
+  width: 100%; max-width: 420px; background: var(--panel, #1b1f27); color: #fff;
+  border-radius: 16px; padding: 18px; text-align: center;
+}
+.coach-card h3 { margin: 0 0 12px; }
+.coach-card p { font-size: .88rem; line-height: 1.4; opacity: .85; }
+.coach-demos { display: flex; gap: 10px; }
+.coach-demo { flex: 1; margin: 0; }
+.coach-demo figcaption { font-size: .8rem; margin-top: 6px; line-height: 1.3; }
+.coach-demo.bad figcaption { color: #ff8a8a; }
+.coach-demo.good figcaption { color: #8fe3a4; }
+.coach-stage {
+  position: relative; height: 110px; border-radius: 12px; background: rgba(255,255,255,.06);
+}
+.coach-you, .coach-feet {
+  position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; margin: -13px;
+  border-radius: 50%; background: #9aa4b2;
+}
+/* Wrong: the person spins, and the phone rides round on the end of the arm. */
+.coach-arm {
+  position: absolute; left: 50%; top: 50%; width: 0; height: 0;
+  animation: coach-spin 3s linear infinite;
+}
+.coach-arm .coach-phone { position: absolute; left: -7px; top: -44px; }
+.coach-phone {
+  display: block; width: 14px; height: 22px; border-radius: 3px; background: #ffd24a;
+  box-shadow: 0 0 0 2px rgba(0,0,0,.4);
+}
+/* Right: the phone turns where it is, and the feet walk round it. */
+.coach-demo.good .coach-phone {
+  position: absolute; left: 50%; top: 50%; margin: -11px -7px;
+  animation: coach-spin 3s linear infinite;
+}
+.coach-demo.good .coach-feet {
+  width: 16px; height: 16px; margin: -8px; background: transparent;
+  animation: coach-orbit 3s linear infinite;
+}
+.coach-demo.good .coach-feet::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; background: #9aa4b2;
+  transform: translateY(34px);
+}
+@keyframes coach-spin { to { transform: rotate(360deg); } }
+@keyframes coach-orbit { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .coach-arm, .coach-demo.good .coach-phone, .coach-demo.good .coach-feet { animation: none; }
 }

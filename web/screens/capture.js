@@ -75,6 +75,7 @@ const ScreenCapture = (() => {
     moveBanner.className = "move-banner";
     moveBanner.hidden = true;
     app.querySelector(".cam-overlay").appendChild(moveBanner);
+    maybeCoach(app);
     const coverWarn = app.querySelector("#coverWarn");
     const retakeBtn = app.querySelector("#retakeBtn");
     const setFrontBtn = app.querySelector("#setFrontBtn");
@@ -288,6 +289,20 @@ const ScreenCapture = (() => {
       sensorMode = await tracker.start();
       renderStatus();
     }
+
+    // Does the phone swing round the photographer between shots? See
+    // swing-meter.js. iOS asks permission for motion separately from
+    // orientation, from a tap; Android needs none.
+    const swing = SwingMeter.create();
+    const onMotion = (e) => swing.sample(e.rotationRate, e.acceleration, e.timeStamp);
+    window.addEventListener("devicemotion", onMotion);
+    let motionAsked = false;
+    app.addEventListener("click", () => {
+      if (motionAsked || typeof DeviceMotionEvent === "undefined" ||
+          typeof DeviceMotionEvent.requestPermission !== "function") return;
+      motionAsked = true;
+      DeviceMotionEvent.requestPermission().catch(() => {});
+    });
     // Chrome needs no gesture; iOS does. Try immediately, and again on any tap.
     startTracking();
     app.addEventListener("click", function once() {
@@ -1047,23 +1062,57 @@ const ScreenCapture = (() => {
           try {
             num = PhotoNames.numbers((await OrbitAPI.listFrames(captureId)).frames || []);
           } catch (_) { /* numbered by index below */ }
-          warnMoved(ring, PhotoNames.movedText(row.moved, num));
+          warnMoved(ring, PhotoNames.movedText(row.moved, num), row.moved);
         }
         return;
       }
     }
 
-    function warnMoved(ring, which) {
+    function warnMoved(ring, which, moved) {
+      coachAgain();
+      // The photos either side of each flagged join, that this session still
+      // holds - a photo taken in an earlier visit has no dot to put back.
+      const flagged = new Set();
+      (moved || []).forEach((m) => { flagged.add(m.a); flagged.add(m.b); });
+      const redo = state.slots.filter((s) => flagged.has(s.index) && state.shots.has(s.id));
       moveBanner.hidden = false;
       moveBanner.innerHTML = `
         <strong>${escapeHtml(ring.label)}: the camera moved at ${escapeHtml(which)}.</strong>
         <span>Nothing in the room moved \u2014 the phone did, swinging round your body.
         Reshoot those turning the phone on the spot: keep it over the same point and
         step your feet around it.</span>
-        <button type="button">Got it</button>`;
-      moveBanner.querySelector("button").addEventListener("click", () => {
+        <div class="move-actions">
+          ${redo.length ? `<button type="button" class="primary" data-act="redo">Reshoot ${redo.length} photo${redo.length === 1 ? "" : "s"}</button>` : ""}
+          <button type="button" data-act="close">${redo.length ? "Not now" : "Got it"}</button>
+        </div>`;
+      moveBanner.querySelector('[data-act="close"]').addEventListener("click", () => {
         moveBanner.hidden = true;
       });
+      const redoBtn = moveBanner.querySelector('[data-act="redo"]');
+      if (redoBtn) redoBtn.addEventListener("click", () => reshoot(ring, redo));
+    }
+
+    // Put the flagged photos' dots back. Each new photo replaces the old one
+    // under the same number when it uploads, and once the ring is whole again
+    // it is stitched and checked again - so a reshoot that still swung says so.
+    function reshoot(ring, slots) {
+      slots.forEach((s) => {
+        const sh = state.shots.get(s.id);
+        if (sh) URL.revokeObjectURL(sh.url);
+        state.shots.delete(s.id);
+      });
+      state.ringsSent.delete(ring.id);
+      moveBanner.hidden = true;
+      swing.reset();
+      renderThumbs(); updateFinishState(); updateGhost(); renderStatus();
+      say(`Reshoot the ${slots.length} blue dot${slots.length === 1 ? "" : "s"} \u2014 turn on the spot`);
+    }
+
+    function warnSwing(sw) {
+      coachAgain();
+      errBox.classList.add("warn");
+      errBox.innerHTML = `<strong>The phone swung about ${Math.round(sw.travel * 100)} cm since the last photo.</strong><br>
+        Turn it on the spot — keep it over the same point and step your feet around it.`;
     }
 
     // A short note that does not shout: the camera screen is busy enough.
@@ -1100,9 +1149,14 @@ const ScreenCapture = (() => {
         // seconds on a phone connection, which read as a laggy camera.
         const url = URL.createObjectURL(blob);
         const shot = { blob, url, index: slot.index, yaw, pitch, quat };
+        const hadShots = state.shots.size > 0;
         state.shots.set(slot.id, shot);
         errBox.textContent = "";
         errBox.classList.remove("warn");
+        // Said on the spot, one photo in, rather than a ring later.
+        const sw = swing.result();
+        swing.reset();
+        if (hadShots && sw.swung) warnSwing(sw);
         addThumb(slot, shot); updateFinishState(); updateGhost(); renderStatus();
         shot.upload = uploadShot(slot, shot);
         maybeStitchRing(slot);
@@ -1210,10 +1264,48 @@ const ScreenCapture = (() => {
     return () => {
       cancelAnimationFrame(raf);
       clearInterval(meterTimer);
+      window.removeEventListener("devicemotion", onMotion);
       tracker.stop();
       if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
       state.shots.forEach((s) => URL.revokeObjectURL(s.url));
     };
+  }
+
+  // How to hold the phone, shown before the first capture and again after one
+  // where the camera swung. Five seconds of it saves a ring of reshoots: the
+  // fault it prevents is the one no stitcher can repair.
+  const COACH_KEY = "orbit.coach";
+  function coachState() {
+    try { return localStorage.getItem(COACH_KEY); } catch (_) { return "seen"; }
+  }
+  function coachAgain() {
+    try { localStorage.setItem(COACH_KEY, "again"); } catch (_) { /* shown once more at most */ }
+  }
+  function maybeCoach(app) {
+    if (coachState() === "seen") return;
+    const card = document.createElement("div");
+    card.className = "coach";
+    card.innerHTML = `
+      <div class="coach-card">
+        <h3>Turn the phone, not your body</h3>
+        <div class="coach-demos">
+          <figure class="coach-demo bad">
+            <div class="coach-stage"><span class="coach-you"></span><span class="coach-arm"><i class="coach-phone"></i></span></div>
+            <figcaption>\u2717 Swinging it round you<br><small>the photos tear</small></figcaption>
+          </figure>
+          <figure class="coach-demo good">
+            <div class="coach-stage"><span class="coach-feet"></span><i class="coach-phone"></i></div>
+            <figcaption>\u2713 Phone stays put, feet step round<br><small>the photos line up</small></figcaption>
+          </figure>
+        </div>
+        <p>Keep the phone over one spot and walk your feet around it. Stand a couple of metres back from anything close.</p>
+        <button type="button" class="primary">Got it</button>
+      </div>`;
+    card.querySelector("button").addEventListener("click", () => {
+      try { localStorage.setItem(COACH_KEY, "seen"); } catch (_) { /* fine */ }
+      card.remove();
+    });
+    app.querySelector(".cam-overlay").appendChild(card);
   }
 
   function shellHtml(capture, plan, slotCount) {
