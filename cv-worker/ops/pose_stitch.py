@@ -343,11 +343,13 @@ def _try_ray_solve(images, sensor_rotations, rotations, shifts, hfov_deg,
 
 
 def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None,
-                      hfov_trusted=False):
+                      hfov_trusted=False, moved_pairs=None):
     """Project photos onto a sphere using their recorded rotations.
 
     images: list of BGR arrays.
     quats:  list of [x,y,z,w] or None, one per image.
+    moved_pairs: (image, image) index pairs the camera moved between; their
+                 join is cut sharply instead of blended (equirect path only).
 
     Returns (ok, panorama_or_None, reason_or_None, SphereGeometry_or_None).
     Never raises.
@@ -419,7 +421,8 @@ def stitch_with_poses(images, quats, hfov_deg=DEFAULT_HFOV_DEG, locked=None,
                          "they were put", pinned)
 
         if settings.equirect_render:
-            return _stitch_equirect(images, usable, rotations, shifts, hfov_deg)
+            return _stitch_equirect(images, usable, rotations, shifts, hfov_deg,
+                                    moved_pairs)
 
         # Shrink the sources so the sphere stays within budget. Done after the
         # field of view is known, because the focal length decides the size.
@@ -576,7 +579,7 @@ def _nadir_fills_holes_only(tiles, masks, corners, photos, width, height):
                                       for b, a in kept))
 
 
-def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
+def _stitch_equirect(images, usable, rotations, shifts, hfov_deg, moved_pairs=None):
     """Render the posed photos onto a wrapping equirectangular canvas.
 
     The same inputs as the warper path - refined rotations, per-photo centre
@@ -645,8 +648,13 @@ def _stitch_equirect(images, usable, rotations, shifts, hfov_deg):
     # 25 s end to end, while 32 photos spent 495 s in the seam finder alone,
     # against 19 s with DP. Above the limit, DP.
     seams = _graph_cut_seams if len(tiles) <= GRAPH_CUT_MAX_PHOTOS else _find_seams
+    # The pairs are named by image; the blend knows tiles, and a photo that
+    # landed nowhere has none.
+    tile_of = {p[0]: t for t, p in enumerate(placed_photos)}
+    sharp = [(tile_of[a], tile_of[b]) for a, b in (moved_pairs or ())
+             if a in tile_of and b in tile_of]
     pano, cover = blend_wrapped(tiles, masks, corners, width, height,
-                                find_seams=seams)
+                                find_seams=seams, sharp_pairs=sharp)
     geom = SphereGeometry(circumference_px=float(width), equator_y=height / 2.0,
                           coverage=cover, hfov_deg=hfov_deg, wrapped=True,
                           photos=placed_photos)

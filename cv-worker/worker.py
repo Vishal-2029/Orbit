@@ -765,7 +765,10 @@ def handle_ring_job(mc, capture_id, ring):
         # Photos placed by hand are anchors: the build puts them exactly where
         # they were put, and no solve may move them.
         locked = [_manual_rotation(f) for f in loaded]
-        ok, pano, reason, geom = stitch_with_poses(images, quats, locked=locked)
+        ok, pano, reason, geom = stitch_with_poses(
+            images, quats, locked=locked,
+            hfov_deg=lens_hfov or DEFAULT_HFOV_DEG, hfov_trusted=lens_hfov is not None,
+            moved_pairs=[(m["i"], m["j"]) for m in moved])
     if not ok or pano is None:
         ok, pano, reason, geom, _ = stitch_with_features(images)
     _release(images)
@@ -785,9 +788,12 @@ def handle_ring_job(mc, capture_id, ring):
             coverage=geom.coverage if geom else None,
             equirect=False)
         note = ("covers %.0f degrees" % info.span_deg) if info else ""
+        full_turn = bool(info and info.full_turn)
     except Exception as e:
         log.warning("%s ring %s: clean-up failed (%s); using the raw stitch", PREFIX, ring, e)
         note = ""
+        full_turn = False
+    _place_joins(moved, geom, full_turn)
 
     h, w = pano.shape[:2]
     try:
@@ -808,6 +814,54 @@ def handle_ring_job(mc, capture_id, ring):
         "note": note,
         "moved": moved,
     })
+
+
+def _moved_pairs_from_rings(capture_id, frames):
+    """The joins the ring checks flagged, as positions in `frames`.
+
+    Each ring was checked while it was being shot. The full build reuses that
+    rather than checking again: the photos are the same ones, unless one was
+    reshot since - and a reshot photo's ring was checked again when it was.
+    """
+    try:
+        rings = get_json(f"/api/v1/captures/{capture_id}/rings").get("rings") or []
+    except Exception as e:
+        log.info("%s capture=%s: no ring checks to reuse (%s)", PREFIX, capture_id, e)
+        return []
+    pos = {int(f["index"]): k for k, f in enumerate(frames)}
+    pairs = []
+    for r in rings:
+        for m in r.get("moved") or ():
+            a, b = pos.get(m.get("a")), pos.get(m.get("b"))
+            if a is not None and b is not None:
+                pairs.append((a, b))
+    if pairs:
+        log.info("%s capture=%s: cutting %d join(s) sharply where the camera moved",
+                 PREFIX, capture_id, len(pairs))
+    return pairs
+
+
+def _place_joins(moved, geom, full_turn):
+    """Say where each moved join sits across the ring's picture, as `x` from 0
+    (left edge) to 1, so the restitch screen can mark it on the preview.
+
+    Only for a full turn rendered as one wrapped canvas: that picture is exactly
+    one turn wide with yaw 0 in the middle, so a direction is a column. Any
+    other picture has been cropped by an amount this does not know, and a mark
+    in the wrong place is worse than none.
+    """
+    if not moved or geom is None or not full_turn or not getattr(geom, "wrapped", False):
+        return
+    yaw_of = {p[0]: p[1] for p in (geom.photos or ())}
+    for m in moved:
+        ya, yb = yaw_of.get(m["i"]), yaw_of.get(m["j"])
+        if ya is None or yb is None:
+            continue
+        # Halfway along the short way round, so a join across the back of the
+        # ring lands at the edge rather than in the middle.
+        d = math.atan2(math.sin(yb - ya), math.cos(yb - ya))
+        mid = ya + d / 2.0
+        m["x"] = round((0.5 + mid / (2.0 * math.pi)) % 1.0, 4)
 
 
 def handle_finalize_job(mc, job, attempt=1):
@@ -987,7 +1041,8 @@ def handle_finalize_job(mc, job, attempt=1):
             images, quats,
             hfov_deg=lens_hfov[0] or DEFAULT_HFOV_DEG,
             hfov_trusted=lens_hfov[0] is not None,
-            locked=[_manual_rotation(f) for f in ring])
+            locked=[_manual_rotation(f) for f in ring],
+            moved_pairs=_moved_pairs_from_rings(capture_id, ring))
         if ok and pano is not None:
             src_h, src_w = images[0].shape[:2]
             coverage = sphere_coverage(

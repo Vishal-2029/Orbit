@@ -281,8 +281,33 @@ def _bands_for(width, height):
     return max(3, min(7, bands))
 
 
-def blend_wrapped(tiles, masks, corners, width, height, find_seams=None):
+# How few bands the blend uses where the camera moved between two photos.
+# Multi-band blending hands over each level of detail across a width that
+# doubles per band - at seven bands, edges are mixed across a hundred pixels or
+# more. Where both photos agree that is invisible. Where the camera moved, a
+# door frame sits in a different place in each, and mixing them draws it twice.
+# One band hands over within a few pixels: a clean cut instead of a ghost.
+SHARP_BANDS = 1
+
+
+def _overlap_of(masks, corners, a, b, width, height):
+    """Where tiles a and b both landed, as a 0/255 canvas-sized mask."""
+    ma = np.zeros((height, width), np.uint8)
+    mb = np.zeros((height, width), np.uint8)
+
+    def put(region, src):
+        np.maximum(region, src, out=region)
+    _paste_wrapped(ma, masks[a], corners[a][0] % width, corners[a][1], put)
+    _paste_wrapped(mb, masks[b], corners[b][0] % width, corners[b][1], put)
+    return np.minimum(ma, mb)
+
+
+def blend_wrapped(tiles, masks, corners, width, height, find_seams=None,
+                  sharp_pairs=None):
     """Seam and multi-band blend on a canvas that wraps left to right.
+
+    sharp_pairs  (tile, tile) pairs the camera moved between; their overlap is
+                 handed over sharply rather than mixed (see SHARP_BANDS)
 
     Returns (panorama BGR, coverage uint8), both exactly width x height.
     """
@@ -295,6 +320,14 @@ def blend_wrapped(tiles, masks, corners, width, height, find_seams=None):
     for mask, (cx, cy) in zip(masks, corners):
         _paste_wrapped(cover, mask, cx, cy,
                        lambda region, src: np.maximum(region, src, out=region))
+
+    # Taken before seam finding, which trims the masks down to one photo each.
+    sharp = None
+    for a, b in sharp_pairs or ():
+        both = _overlap_of(masks, corners, a, b, width, height)
+        sharp = both if sharp is None else np.maximum(sharp, both)
+    if sharp is not None and not sharp.any():
+        sharp = None
 
     pieces, piece_masks, piece_corners = [], [], []
     for tile, mask, (cx, cy) in zip(tiles, masks, corners):
@@ -317,13 +350,28 @@ def blend_wrapped(tiles, masks, corners, width, height, find_seams=None):
 
     log.info("[orbit-worker] blending %d photos (%d pieces across the wrap) onto "
              "a %dx%d sphere with %d bands", len(tiles), len(pieces), width, height, bands)
-    blender = cv2.detail_MultiBandBlender()
-    blender.setNumBands(bands)
-    blender.prepare((-pad, 0, width + 2 * pad, height))
-    for im, m, c in zip(pieces, piece_masks, piece_corners):
-        blender.feed(im.astype(np.int16), m, c)
-    result, _ = blender.blend(None, None)
-    pano = cv2.convertScaleAbs(result)[:, pad:pad + width]
-    pano = np.ascontiguousarray(pano)
+    def blend(n_bands):
+        blender = cv2.detail_MultiBandBlender()
+        blender.setNumBands(n_bands)
+        blender.prepare((-pad, 0, width + 2 * pad, height))
+        for im, m, c in zip(pieces, piece_masks, piece_corners):
+            blender.feed(im.astype(np.int16), m, c)
+        result, _ = blender.blend(None, None)
+        return np.ascontiguousarray(cv2.convertScaleAbs(result)[:, pad:pad + width])
+
+    pano = blend(bands)
+    if sharp is not None:
+        # The sharp blend replaces the smooth one across those overlaps and a
+        # margin as wide as the widest band, fading back so the switch itself
+        # leaves no edge.
+        reach = 1 << bands
+        grown = cv2.dilate(sharp, cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * reach + 1, 2 * reach + 1)))
+        weight = cv2.GaussianBlur(grown.astype(np.float32) / 255.0, (0, 0),
+                                  sigmaX=reach / 2.0)[..., None]
+        crisp = blend(SHARP_BANDS)
+        pano = (pano * (1.0 - weight) + crisp * weight).astype(np.uint8)
+        log.info("[orbit-worker] handed over %d join(s) sharply where the camera "
+                 "moved", len(sharp_pairs))
     pano[cover == 0] = 0
     return pano, cover
