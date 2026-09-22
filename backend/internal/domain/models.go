@@ -249,6 +249,9 @@ type RingJoin struct {
 	Turned int     `json:"turned"`
 	Moved  int     `json:"moved"`
 	Ratio  float64 `json:"ratio"`
+	// Where the join sits across the ring's picture, 0 (left) to 1. Absent
+	// when the worker could not place it exactly.
+	X *float64 `json:"x,omitempty"`
 }
 
 // PhotoMarker is where one photo's centre landed on a finished sphere.
