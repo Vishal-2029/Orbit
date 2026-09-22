@@ -210,10 +210,18 @@ const ScreenRestitch = (() => {
           ? `<div class="ring-moved">The camera moved at ${escapeHtml(PhotoNames.movedText(row.moved, num))}.
                Reshoot those turning the phone on the spot to fix the tears there.</div>`
           : "";
+        // And where on the picture: a red band over each join that will tear,
+        // placed by the worker when it knows exactly (a full wrapped turn).
+        const marks = row && row.moved ? row.moved.filter((m) => typeof m.x === "number")
+          .map((m) => `<span class="seam-mark" style="left:${(m.x * 100).toFixed(2)}%"
+                title="${escapeHtml(PhotoNames.movedText([m], num))}"></span>`).join("") : "";
         const preview = row && row.panorama ? `
           <div class="ring-preview">
-            <img src="${row.panorama}" alt="${escapeHtml(g.ring.label)} stitched"
-                 loading="lazy" onerror="this.closest('.ring-preview').hidden=true">
+            <div class="ring-pic">
+              <img src="${row.panorama}" alt="${escapeHtml(g.ring.label)} stitched"
+                   loading="lazy" onerror="this.closest('.ring-preview').hidden=true">
+              ${marks}
+            </div>
             <div class="muted">${escapeHtml(row.note || "")}</div>
             ${moved}
           </div>` : moved;
